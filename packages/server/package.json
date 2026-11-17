@@ -1,0 +1,26 @@
+{
+  "name": "@swarmwatch/server",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@swarmwatch/core": "0.1.0",
+    "chokidar": "6.0.0",
+    "ws": "8.23.0"
+  },
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Duioolllll/swarm-ai-edit.git",
+    "directory": "packages/server"
+  },
+  "homepage": "https://github.com/Duioolllll/swarm-ai-edit#readme",
+  "bugs": {
+    "url": "https://github.com/Duioolllll/swarm-ai-edit/issues"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@swarmwatch/dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -p tsconfig.json --noEmit && vite build"
+  },
+  "dependencies": {
+    "@swarmwatch/core": "0.1.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "vite": "8.3.8"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Duioolllll/swarm-ai-edit.git",
+    "directory": "apps/dashboard"
+  },
+  "homepage": "https://github.com/Duioolllll/swarm-ai-edit#readme",
+  "bugs": {
+    "url": "https://github.com/Duioolllll/swarm-ai-edit/issues"
+  }
+}
