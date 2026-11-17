@@ -1,84 +1,104 @@
 # SwarmWatch 아키텍처
 
-SwarmWatch는 실제 개발 과정을 관찰하는 로컬 monorepo입니다. 참고 확장의 일회성 페이지 재구성 엔진과 달리 원래 앱의 DOM·상태·스크립트를 유지하고 외부 overlay만 애니메이션으로 표시합니다. 참고 코드·에셋은 재사용하지 않았습니다. [분석 근거](reference-analysis.md)를 보세요.
+SwarmWatch는 **프레임워크 독립 파일 관찰 + 선택적 실제 DOM 관찰** 도구입니다. 기본 경로는 모델을 호출하지 않고 deterministic local diff를 계산합니다. 시각화는 원래 앱을 iframe에서 계속 실행하며 별도 overlay만 사용합니다. 참고 프로젝트의 페이지 재구성 엔진·코드·에셋은 포함하지 않았습니다. [분석](reference-analysis.md) · [출처](credits.md)
 
 ```mermaid
 flowchart LR
-  Agent[Codex JSONL / OpenCode SSE] --> Adapter[Agent adapter]
-  Disk[Project files] --> Watcher[chokidar watcher]
-  Adapter --> Collector[Validated collector]
-  Watcher --> Collector
+  Files[Project files] --> Watcher[chokidar + bounded local diff]
+  Watcher --> Collector[Validated collector]
   Collector --> Store[(SQLite event log)]
   Collector --> WS[Local WebSocket]
   WS --> Dashboard[React dashboard]
-  App[Actual Vite app in iframe] --> Bridge[HMR + DOM bridge]
+  Dashboard -->|real file trigger| Bridge[Generic bridge or Vite HMR bridge]
+  App[Actual local app] -->|measured DOM delta| Bridge
   Bridge -->|checked postMessage| Dashboard
-  Dashboard -->|measured DOM packet| WS
+  Dashboard -->|validated DOM packet| WS
   WS --> Collector
-  Dashboard --> Overlay[Per-source cursor overlay]
+  Dashboard --> Overlay[Per-source overlay]
+  Agent[Explicit dev --allow-agents only] -.-> Adapter[Codex JSONL / OpenCode SSE]
+  Adapter -.-> Collector
 ```
 
-## 모듈 경계
+## 모듈과 빌드 순서
 
 | 경로 | 책임 |
 | --- | --- |
-| `packages/core/src/index.ts` | Zod event/DOM schema, 타입, 경로·metadata 필터, 상태와 identity별 bounded FIFO |
-| `packages/server/src/watcher.ts` | realpath로 제한한 파일 감시, 초기 파일·symlink·비밀 경로 제외 |
-| `packages/server/src/collector.ts` | 이벤트 검증, 중복 제거, 파일/DOM 시간·소스 연결 |
-| `packages/server/src/store.ts` | SQLite WAL, 세션, event ID uniqueness, 증가 sequence |
-| `packages/server/src/index.ts` | loopback HTTP, 정적 dashboard, read-only API, WebSocket 인증·복구 |
-| `packages/vite-plugin/src/index.ts` | development JSX transform, source attribute, bridge script, Vite HMR hook |
-| `packages/vite-plugin/src/client.ts` | DOM snapshot 차이, MutationObserver/ResizeObserver, HMR burst, 부모 통신 |
-| `packages/cli/src/index.ts` | 인수 검증, child process 시작·종료, 명시적 test/build 실행, adapter 연결 |
-| `packages/cli/src/adapters.ts` | Codex 공식 JSONL/OpenCode v1 SSE에서 allowlist 이벤트로 변환 |
-| `apps/dashboard/src/main.tsx` | iframe, 상태·출처 표시, cursor scheduling, timeline, event replay |
+| `packages/core/src/index.ts` | event/DOM Zod schema, 경로·metadata 검증, 상태, bounded FIFO |
+| `packages/bridge/src/client.ts` | framework-free DOM 측정·차이, MutationObserver/ResizeObserver, parent 통신, generic/HMR mode |
+| `packages/bridge/src/index.ts` | self-contained classic script 직렬화, 정확한 loopback origin alias |
+| `packages/server/src/analyzer.ts` | bounded 파일 snapshot·hash, 로컬 line diff, metadata만 반환 |
+| `packages/server/src/watcher.ts` | 초기 scan baseline, 파일 감시, coalescing/backpressure, analyzer 수명 |
+| `packages/server/src/collector.ts` | 공통 검증, 이벤트 중복 제거, 파일·DOM correlation, 출처·한계 설명 |
+| `packages/server/src/store.ts` | SQLite WAL, session, event ID uniqueness, 증가 sequence |
+| `packages/server/src/index.ts` | HTTP/dashboard, `/bridge.js`, capability WebSocket, catch-up |
+| `packages/vite-plugin/src/index.ts` | 선택적 serve-only JSX mapping, 공통 bridge를 HMR mode로 설치 |
+| `packages/cli/src/options.ts` | 서버·child 시작 전 mode/URL/agent 옵션 검증 |
+| `packages/cli/src/index.ts` | 서버·명시적 child 수명, 선택적 검사·adapter 연결 |
+| `packages/cli/src/adapters.ts` | 공식 Codex JSONL/OpenCode v1 SSE allowlist 변환 |
+| `apps/dashboard/src/main.tsx` | Preview 없는 관찰도 지원, file-control 전송, source별 animation, Replay |
 
-## 라이브 파이프라인
+`npm run build`: **core → bridge → server → Vite plugin → CLI → dashboard**. 서버는 dashboard의 checkout 상대 경로와 빌드된 bridge를 사용하므로 현재 배포 단위는 전체 저장소입니다.
 
-1. CLI가 허용 프로젝트의 realpath와 loopback Preview URL을 검증하고 SQLite 세션·로컬 서버를 만듭니다. 선택적으로 개발 서버·Codex를 시작하거나 OpenCode SSE를 구독합니다. 기존 개발 서버는 소유하지 않습니다.
-2. watcher는 초기 scan 후 새 변경만 발행합니다. 원본 파일 내용은 읽어 이벤트에 보관하지 않습니다. 에이전트 없는 변경은 항상 `file-observer / inferred`입니다.
-3. Vite plugin은 `serve`에서만 JSX의 실제 DOM tag에 파일·컴포넌트·노드 ID attribute를 추가합니다. 소스 파일을 수정하지 않고 sourcemap을 반환합니다. component invocation에는 DOM attribute를 직접 추가하지 않습니다.
-4. bridge가 최초 React render를 baseline으로 측정합니다. initial render를 생성 작업으로 표시하지 않습니다. 이후 DOM·스타일·직접 텍스트·미디어와 geometry를 비교합니다.
-5. `vite:beforeUpdate`와 `vite:afterUpdate`가 HMR burst ID와 제한된 관찰 구간을 엽니다. 일반 입력은 구간을 닫고 baseline을 갱신합니다. scroll/resize는 위치 baseline만 바꾸며 작업을 만들지 않습니다. HMR가 없는 DOM delta는 애니메이션 이벤트로 승격하지 않습니다.
-6. bridge는 configured parent origin, parent Window와 nonce를 확인하고 DOM packet을 전송합니다. dashboard는 iframe Window·preview origin·nonce를 다시 검사하고 Zod 검증 뒤 local WebSocket으로 전달합니다. 교차 출처 DOM을 직접 읽지 않습니다.
-7. WebSocket 입력은 200ms settling 구간을 거쳐 100ms watcher debounce가 완료되도록 합니다. collector는 HMR ID, 시간과 파일 mapping을 검사합니다. 정확한 instrumented source가 있으면 같은 파일 이벤트와 연결하고, 더 최근 CSS 변경은 명시적으로 추정 연결합니다. HMR가 watcher보다 먼저 완료되는 race는 추가로 2초 bounded buffer로 대기합니다. 매칭되지 않으면 버립니다.
-8. 확정된 이벤트가 SQLite에 저장된 후 브라우저로 전송됩니다. overlay는 측정한 사각형 위에서 source별 큐로 실행됩니다. 원래 앱의 DOM을 비우거나 타이핑을 위해 수정하지 않습니다. SVG pointer·선택 테두리·텍스트 trace는 별도 레이어입니다.
+## 기본 no-AI 경계
 
-HMR 구간과 파일 mapping은 상관관계를 좁힐 뿐 정확한 AI 원인을 증명하지 않습니다. `confidence=measured`는 geometry와 DOM delta를 실측했다는 의미입니다. 파일 작성자와 CSS 연결은 `metadata.reason`·`metadata.mapping`으로 한계를 보존합니다. 대상을 모르면 임의 컴포넌트를 선택하지 않습니다.
+`watch --project PATH`는 URL 없이 시작할 수 있습니다. React·Vite·API 키를 요구하지 않습니다. `--codex`, `--opencode`, `--allow-agents`는 서버·child·adapter를 시작하기 전에 거부합니다. 호환 `dev`도 provider 옵션에 `--allow-agents`가 필요하며 `SWARMWATCH_NO_AI=1`이면 opt-in을 거부합니다. 기본 경로에서는 agent adapter를 동적으로 import하거나 공급자에 연결하지 않습니다.
+
+명시적인 `--` 개발 명령, test/build command는 사용자가 전달한 로컬 child process입니다. 그 명령이나 앱 자체·별도 AI 도구가 발생시키는 API 사용은 이 경계 밖입니다. SwarmWatch의 기본 관찰이 모델을 호출하지 않는다는 것이 시스템 전체의 토큰 사용을 차단한다는 뜻은 아닙니다.
+
+## 파일 관찰과 로컬 diff
+
+초기 scan은 baseline을 만들고 새로운 변경만 `file-observer / file-watcher / inferred`로 발행합니다. 지원 확장자는 script·markup·style·Vue/Svelte/Astro·서버 template·data·asset이며 framework AST나 compiler 실행이 필요하지 않습니다. 정확한 목록은 [파일 관찰](file-watch.md)에 있습니다.
+
+분석기는 파일당 256KiB, 보관 텍스트 합계 16MiB, 10,000 entry를 기본 한도로 둡니다. 파일은 realpath·regular-file·inode/device·symlink 조건을 확인한 뒤 한도만 읽습니다. snapshot과 hash는 프로세스 메모리 안에서만 쓰며 분석 결과에는 언어·종류, byte 수, 추가·삭제 line 수와 계산 방법·한계만 포함합니다. 원문 snippet·diff·hash는 SQLite로 전달하지 않습니다.
+
+line diff는 공통 prefix/suffix를 줄이고 LCS를 제한된 작업량으로 계산합니다. `exact-line-diff`는 정확한 line 수이며 1,000,000 cell 초과 시 `whole-file-replacement` fallback을 명시합니다. 파일 한도·binary·snapshot budget·baseline 부재 등은 `unavailable`과 `null` line 수입니다. asset은 byte/hash 증거만 사용합니다. watcher는 2,000개 파일까지 pending queue를 병합하고 overflow를 보고합니다.
+
+## 범용 Preview 파이프라인
+
+1. 선택적 `--url`은 실제 실행 중인 local HTTP 앱을 iframe으로 표시합니다. URL이 없으면 파일 분석 대시보드만 제공합니다. SwarmWatch는 임의 앱을 자동 감지해 개발 runtime을 설치하지 않습니다.
+2. 사용자는 개발 HTML/layout에 `<script src="http://127.0.0.1:4317/bridge.js"></script>`를 직접 추가합니다. 서버는 공통 bridge를 `mode:file-change` classic script로 제공하며 source 자동 주입은 없습니다.
+3. 최초 화면을 baseline으로 측정합니다. bridge는 DOM 요소·직접 텍스트·일부 computed style·image·geometry의 실제 차이를 비교합니다. source 파일을 알 수 없는 요소는 `unknown`, 명시적인 `data-sw-file`은 opt-in mapping입니다.
+4. dashboard는 현재 연결 뒤에 관찰된 최신 실제 파일 이벤트만 검증된 `file-change` control로 iframe에 전송합니다. control에는 event ID, 파일 경로, timestamp와 nonce가 있습니다. Replay·연결 catch-up을 새로운 라이브 개발 trigger로 사용하지 않습니다.
+5. bridge는 parent Window·정확한 origin·nonce, 안전한 경로, timestamp freshness·중복 ID를 확인하고 짧은 관찰 구간을 엽니다. DOM이 파일 알림보다 먼저 바뀌는 race는 최대 100개의 delta를 500ms 이내 pending buffer로 보관합니다. file control 없이 DOM delta만으로 발행하지 않습니다.
+6. 반환 DOM packet을 dashboard가 iframe Window·preview origin·nonce·schema로 검증합니다. WebSocket은 200ms settling 후 collector로 전달합니다. collector는 triggerEventId가 실제 최근 watcher 이벤트인지 다시 검증합니다.
+7. source가 없는 generic correlation은 **추정**입니다. DOM geometry와 변화는 실측하지만 어느 파일이 어떤 요소의 원인이었는지 또는 누가 작성했는지 증명하지 못합니다. source를 모르면 모델로 보충하지 않습니다.
+
+trusted 입력은 관찰 구간·pending을 취소합니다. scroll/resize는 baseline만 바꿉니다. full reload는 새 문서 baseline이므로 초기 화면을 생성 애니메이션으로 꾸미지 않습니다. bridge가 앱의 HMR·갱신 runtime을 대신하지 않습니다. Plain HTML 예제는 별도 작은 polling runtime으로 `content.html`을 실제 DOM에 반영해 범용 관찰을 검증합니다.
+
+## 선택적 Vite 계측
+
+Vite plugin은 `serve` transform에서 실제 JSX DOM tag에 `data-sw-file`, component, node ID를 삽입하고 sourcemap을 반환합니다. source 파일·component invocation을 직접 수정하지 않으며 production build에는 적용하지 않습니다. 공통 bridge를 `hmr` mode로 사용하고 `vite:beforeUpdate`·`vite:afterUpdate`를 HMR burst에 연결합니다.
+
+collector는 burst ID·시간·파일 mapping을 검사합니다. instrumented source와 같은 파일 이벤트를 연결하거나 더 최근 CSS 변경을 추정 연결합니다. HMR가 watcher보다 빠른 경우 200ms settling과 2초 bounded race buffer를 사용하고 매칭되지 않으면 버립니다. HMR 구간에서도 exact causation을 보장하지 않습니다. `confidence:measured`는 DOM delta·geometry의 실측이고 작성자·mapping 한계는 metadata에 별도로 보존합니다.
+
+범용 script와 Vite plugin은 동시에 설치하지 않습니다. 둘 다 실제 앱을 유지하고 SVG pointer·선택·텍스트·이미지 trace를 외부 overlay에서 실행합니다. 대상을 모르면 임의 컴포넌트를 고르지 않습니다.
 
 ## 이벤트·저장·복구
 
-필수 event 필드는 eventId/sessionId/agentId/timestamp/eventType/status/source/confidence/metadata이며 filePath/componentName은 선택입니다. 전체 계약은 [Adapter 가이드](adapters.md)와 core schema에 있습니다. Store는 전역 증가 sequence를 부여하고 eventId uniqueness로 중복을 제거합니다. timestamp는 관찰 시각이며 race 복구 때문에 sequence와 시간 순서가 다를 수 있습니다. 연결 복구에는 sequence를, Replay에는 시간 정렬을 사용합니다.
+eventId/sessionId/agentId/timestamp/eventType/status/source/confidence/metadata가 공통 계약이며 filePath/componentName은 선택입니다. [Adapter 계약](adapters.md)과 core schema가 기준입니다. `source:agent-hook`는 공식 agent transport를 뜻하며 universal hook API의 존재를 뜻하지 않습니다.
 
-SQLite 기본 위치는 `<project>/.swarmwatch/sessions.sqlite`입니다. 이 디렉터리는 watcher에서 제외됩니다. 이벤트·세션·측정 geometry만 저장하고 과거 HTML/CSS/screenshot은 저장하지 않습니다. Replay는 현재 iframe 위에서 저장된 이벤트를 설명하는 방식이며 당시 화면을 복원하지 않습니다. export도 `historicalDom:false`를 포함합니다.
+Store는 증가 sequence와 eventId uniqueness로 순서·중복을 관리합니다. race 때문에 timestamp와 sequence 순서가 다를 수 있습니다. 연결 복구는 sequence, Replay는 시간 정렬과 sequence tie-break를 사용합니다. 기본 `<project>/.swarmwatch/sessions.sqlite`는 watcher에서 제외됩니다.
 
-Dashboard WebSocket이 끊기면 마지막 받은 sequence 이후를 다시 요청합니다. OpenCode의 upstream SSE는 별도 수명이며 durable catch-up이 없어 gap을 알립니다. 프로세스·열린 socket은 저장된 환경 snapshot에 포함되지 않으므로 새 작업에서는 CLI를 다시 실행해야 합니다.
+SQLite에는 이벤트·로컬 분석 metadata·측정 geometry만 저장합니다. 과거 HTML/CSS/image snapshot이 없어 Replay는 당시 화면을 복원하지 않습니다. iframe은 현재 앱이고 export는 `historicalDom:false`입니다. dashboard의 마지막 sequence 이후 기록은 복구하지만, 선택적 OpenCode upstream SSE gap의 durable catch-up은 보장하지 않습니다.
 
-## 로컬 API
+## 로컬 API와 안전
 
-| 인터페이스 | 응답/역할 |
+| 인터페이스 | 역할 |
 | --- | --- |
-| `GET /api/state` | 현재 session, project, preview URL, 로컬 WS token, 이벤트 |
-| `GET /api/sessions` | 저장된 세션 목록 |
-| `GET /api/sessions/:id/events` | sequence 순서 이벤트 |
-| `GET /api/sessions/:id/export` | format/session/historicalDom/events |
-| `/ws?token=…&sessionId=…&after=N` | `{type:'events',events:[…]}` 및 catch-up |
-| WS client `{type:'dom',changes:[…]}` | 현재 세션의 검증된 DOM 관찰만 입력 |
+| `GET /api/state` | session, project, 선택 preview URL, token, mode/aiEnabled, 이벤트 |
+| `GET /bridge.js` | framework-free classic DOM bridge; 추가 데이터 API 권한 없음 |
+| `GET /api/sessions` | 저장된 세션 |
+| `GET /api/sessions/:id/events` 또는 `/export` | 순서 이벤트·JSON export |
+| `/ws?token=…&sessionId=…&after=N` | 이벤트·catch-up, 현재 session DOM 관찰만 입력 |
 
-쓰기 HTTP API나 임의 명령 실행 API는 없습니다. CLI 명령은 사용자가 명시적으로 전달한 경우 로컬 child process로 실행됩니다.
+서버는 `127.0.0.1` 바인딩, exact Host/Origin, WS의 필수 Origin·random capability를 사용합니다. `/bridge.js`만 지정 preview origin의 로딩을 허용하며 전체 API에 CORS를 열지 않습니다. HTTP는 GET이며 임의 명령 실행 endpoint가 없습니다. dashboard CSP와 bridge의 Window·origin·nonce 검증으로 교차 출처 DOM 직접 접근을 피합니다.
 
-## 보안과 개인정보
+민감 경로·symlink 탈출은 제외합니다. agent raw message·prompt·reasoning·command/output은 저장하지 않습니다. bridge는 input/textarea/select/contenteditable와 `data-sw-private` 영역을 제외합니다. 일반 DOM 직접 텍스트는 남을 수 있고 metadata redaction은 모든 비밀을 탐지하지 못합니다. 앱 개발 서버 자체의 노출·CSP·비용은 사용자가 관리합니다.
 
-- 서버는 `127.0.0.1`에만 바인딩합니다. exact Host·Origin allowlist와 random capability token을 검증합니다. HTTP는 GET만 허용하고 WebSocket은 Origin이 필수입니다. dashboard CSP는 자기 script와 지정 preview만 허용합니다.
-- watcher와 adapter는 realpath·상대 경로·symlink 탈출·민감한 파일을 검사합니다. `.env*`, credentials/secrets, private keys, `.git`, `node_modules`, build output은 제외합니다.
-- agent 메시지·reasoning·프롬프트·raw command·출력을 수집하지 않습니다. 제한된 metadata만 사용하고 크기/깊이·비밀 패턴을 필터링합니다.
-- bridge는 input/textarea/select/contenteditable와 `data-sw-private` 영역을 제외합니다. 일반 DOM의 직접 텍스트는 이벤트에 포함될 수 있고 redaction은 모든 비밀을 찾지 못합니다. export는 사용자가 확인해야 합니다.
-- preview 앱의 개발 서버 자체 노출·CSP·코드는 그 앱의 책임입니다. SwarmWatch는 remote URL 또는 임의 origin에 접근 권한을 부여하지 않습니다.
+## 한계와 성능
 
-## 제한과 성능
+한 세션 100,000 이벤트, recent file 300개, DOM dedup 4,000개, HMR race buffer 200개/2초로 제한합니다. WebSocket payload는 128KiB, DOM packet은 최대 50개, 대기 DOM 200개와 message rate 제한이 있습니다. 전송 backlog 1MiB 이상은 연결을 닫고 sequence 재연결을 유도합니다. source별 animation FIFO와 대표 요소 batching으로 overlay 양을 제한합니다.
 
-한 세션은 최대 100,000 이벤트, recent file correlation은 300개, DOM dedup은 4,000개, HMR race buffer는 200개/2초로 제한합니다. WebSocket packet은 128KiB, DOM packet은 최대 50 delta, 초당 message 제한이 있으며 1MiB 이상 전송 backlog는 연결을 닫고 sequence 기반 재연결을 유도합니다. source별 animation FIFO도 bounded입니다. 같은 HMR 구간의 파일·컴포넌트·작업 종류별 관측을 대표 애니메이션으로 묶어 새 컴포넌트가 하위 요소 이벤트에 밀리지 않게 합니다. 별도 에이전트 큐는 독립적이며 원본 이벤트는 모두 기록합니다.
+bridge는 최대 2,500 요소를 80ms batching으로 측정하고 한 측정 최대 100 delta를 보냅니다. 큰 변경은 일부 overlay를 생략할 수 있습니다. computed style·diff 비용은 페이지 규모에 영향을 받고 대규모 앱의 완전한 성능을 보장하지 않습니다.
 
-bridge는 최대 2,500 요소를 측정하고 80ms로 batching합니다. 한 측정의 최대 100 delta를 최대 50개씩 전송합니다. 큰 변경은 일부 overlay를 생략할 수 있지만 실제 앱과 파일 이벤트는 유지됩니다. computed style 측정과 DOM diff는 페이지 규모에 영향을 받습니다. 대규모 앱의 완전한 성능 보장은 하지 않습니다.
-
-React + Vite JSX와 HMR를 우선 지원합니다. full reload는 새로운 baseline이며 초기 화면 작업을 복원하지 않습니다. arbitrary framework mapping, Next.js, shadow DOM 내부의 완전한 추적, historical screenshot replay, Codex 협업 receiver 연결, 전체 test runner 결과 파싱은 미지원입니다. adapter의 fixture/mock 검증은 실제 provider 인증 실행 검증과 구분합니다.
+framework-independent 파일 관찰과 DOM 측정은 framework별 compiler mapping과 다릅니다. Next.js 전용 자동 계측, shadow DOM 전체 추적, 과거 화면 복원, Codex 협업 receiver 연결, 전체 test assertion 파싱은 미지원입니다. 실제 인증 provider 실행은 fixture/mock 검증과 구분합니다. 프로세스·socket은 환경 snapshot에 남지 않아 새 작업에서 CLI를 다시 시작해야 합니다.

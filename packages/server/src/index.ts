@@ -5,21 +5,22 @@ import {basename,extname,join,relative,resolve,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {WebSocketServer,WebSocket} from 'ws';
 import {DomChangeSchema,type DomChange} from '@swarmwatch/core';
+import {bridgeScript} from '@swarmwatch/bridge';
 import {EventStore} from './store.js';
 import {Collector} from './collector.js';
 import {watchProject} from './watcher.js';
 export {EventStore} from './store.js';
 export {Collector} from './collector.js';
 
-export type ServerOptions={project:string;previewUrl:string;port?:number;dataDir?:string;projectName?:string;demo?:boolean};
+export type ServerOptions={project:string;previewUrl?:string;port?:number;dataDir?:string;projectName?:string;demo?:boolean;aiEnabled?:boolean};
 export async function startServer(options:ServerOptions){
   const project=await realpath(options.project);if(!(await stat(project)).isDirectory())throw new Error('Project must be a directory');
-  const preview=new URL(options.previewUrl);
-  if(!['http:','https:'].includes(preview.protocol)||!['localhost','127.0.0.1','[::1]'].includes(preview.hostname)||preview.username||preview.password)throw new Error('Preview URL must be a local HTTP(S) development server');
+  const preview=options.previewUrl?new URL(options.previewUrl):undefined;
+  if(preview&&(!['http:','https:'].includes(preview.protocol)||!['localhost','127.0.0.1','[::1]'].includes(preview.hostname)||preview.username||preview.password))throw new Error('Preview URL must be a local HTTP(S) development server');
   const dataDir=resolve(options.dataDir??join(project,'.swarmwatch'));await mkdir(dataDir,{recursive:true});
   const store=new EventStore(join(dataDir,'sessions.sqlite'));
   const sessionId=randomUUID();const token=randomBytes(32).toString('hex');
-  const projectName=options.projectName??basename(project);const previewUrl=preview.href;
+  const projectName=options.projectName??basename(project);const previewUrl=preview?.href??'';
   store.addSession({sessionId,projectName,previewUrl,startedAt:new Date().toISOString()});
   const wss=new WebSocketServer({noServer:true,maxPayload:128*1024});
   const subscriptions=new Map<WebSocket,string>();
@@ -37,11 +38,18 @@ export async function startServer(options:ServerOptions){
   const json=(response:ServerResponse,value:unknown,status=200)=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});response.end(JSON.stringify(value));};
   const dashboard=resolve(fileURLToPath(new URL('../../../apps/dashboard/dist/',import.meta.url)));
   const http=createServer(async(request,response)=>{
-    if(!validRequest(request)){json(response,{error:'Forbidden origin or host'},403);return;}
+    const isBridge=request.url?.split('?')[0]==='/bridge.js';
+    const previewBridgeRequest=!!preview&&isBridge&&allowedHosts().has(request.headers.host??'')&&request.headers.origin===preview.origin;
+    if(!validRequest(request)&&!previewBridgeRequest){json(response,{error:'Forbidden origin or host'},403);return;}
     if(request.method!=='GET'){json(response,{error:'Read-only API'},405);return;}
     try{
       const url=new URL(request.url??'/',`http://127.0.0.1:${port}`);
-      if(url.pathname==='/api/state'){json(response,{sessionId,projectName,previewUrl,token,demo:options.demo??false,events:store.events(sessionId)});return;}
+      if(url.pathname==='/bridge.js'){
+        const headers:Record<string,string>={'Content-Type':'text/javascript; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Cross-Origin-Resource-Policy':'cross-origin'};
+        if(previewBridgeRequest)headers['Access-Control-Allow-Origin']=preview!.origin;
+        response.writeHead(200,headers);response.end(bridgeScript([...allowedOrigins()],{mode:'file-change'}));return;
+      }
+      if(url.pathname==='/api/state'){json(response,{sessionId,projectName,previewUrl,token,demo:options.demo??false,aiEnabled:options.aiEnabled??false,observationMode:options.aiEnabled?'agents':'watch',events:store.events(sessionId)});return;}
       if(url.pathname==='/api/sessions'){json(response,store.sessions());return;}
       const match=url.pathname.match(/^\/api\/sessions\/([a-zA-Z0-9-]+)\/(events|export)$/);
       if(match){if(!store.hasSession(match[1])){json(response,{error:'Unknown session'},404);return;}
@@ -53,7 +61,7 @@ export async function startServer(options:ServerOptions){
       try{if(!(await stat(file)).isFile())file=join(dashboard,'index.html');}catch{file=join(dashboard,'index.html');}
       const body=await readFile(file);
       const types:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon'};
-      response.writeHead(200,{'Content-Type':types[extname(file)]??'application/octet-stream','X-Content-Type-Options':'nosniff','Cache-Control':'no-store','Referrer-Policy':'no-referrer','Content-Security-Policy':`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:${port} ws://localhost:${port}; frame-src ${preview.origin}; frame-ancestors 'none'; base-uri 'none'; object-src 'none'`});response.end(body);
+      response.writeHead(200,{'Content-Type':types[extname(file)]??'application/octet-stream','X-Content-Type-Options':'nosniff','Cache-Control':'no-store','Referrer-Policy':'no-referrer','Content-Security-Policy':`default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://127.0.0.1:${port} ws://localhost:${port}; frame-src ${preview?.origin??"'none'"}; frame-ancestors 'none'; base-uri 'none'; object-src 'none'`});response.end(body);
     }catch{json(response,{error:'Dashboard not built; run npm run build from the workspace root.'},503);}
   });
   http.on('upgrade',(request,socket,head)=>{

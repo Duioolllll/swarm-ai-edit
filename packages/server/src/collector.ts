@@ -28,25 +28,30 @@ export class Collector {
     }
     return saved;
   }
-  file(eventType:'file.created'|'file.modified'|'file.deleted',filePath:string){
-    return this.emit({eventId:randomUUID(),sessionId:this.sessionId,agentId:'file-observer',timestamp:new Date().toISOString(),eventType,filePath,status:'observed',source:'file-watcher',confidence:'inferred',metadata:{reason:'File change observed; author and internal agent intent are unknown.'}});
+  file(eventType:'file.created'|'file.modified'|'file.deleted',filePath:string,metadata:Record<string,unknown>={}){
+    return this.emit({eventId:randomUUID(),sessionId:this.sessionId,agentId:'file-observer',timestamp:new Date().toISOString(),eventType,filePath,status:'observed',source:'file-watcher',confidence:'inferred',metadata:{...metadata,reason:'Code change observed and analyzed locally without AI calls; author and internal agent intent are unknown.'}});
   }
   dom(raw:unknown,receivedAt=Date.now()):SwarmEvent|undefined {
     const parsed=DomChangeSchema.safeParse(raw);if(!parsed.success)return;
     const dom=parsed.data;
-    if(!dom.hmrId?.trim())return; // Live visualization requires an observed Vite HMR burst, not arbitrary UI interaction.
+    const generic=dom.observation==='file-change';
+    if(generic?!dom.triggerEventId:!dom.hmrId?.trim())return;
     if(dom.filePath&&!safeRelativePath(dom.filePath))return;
     if(this.seenDom.has(dom.id))return;
     const now=Date.now();const captured=Date.parse(dom.capturedAt);
     if(Math.abs(now-captured)>30000)return;
-    const candidates=this.recent.filter(e=>Math.abs(captured-Date.parse(e.timestamp))<15000);
+    const candidates=this.recent.filter(e=>Math.abs(captured-Date.parse(e.timestamp))<(generic?2500:15000));
+    const explicitTrigger=generic?candidates.find(e=>e.eventId===dom.triggerEventId&&e.source==='file-watcher'):undefined;
+    // Generic observations must refer to a real server-observed file event. A
+    // reported DOM location never establishes the author or agent's intent.
+    if(generic&&(!explicitTrigger||(dom.filePath&&dom.filePath!==explicitTrigger.filePath&&!/\.(css|scss|sass|less)$/.test(explicitTrigger.filePath??''))))return;
     // Source mapping identifies a JSX element, but a newer stylesheet edit can be
     // its actual trigger. CSS-to-element attribution remains explicitly inferred.
     const matching=dom.filePath?candidates.filter(e=>e.filePath===dom.filePath):[];
     const exact=matching.findLast(e=>e.source==='agent-hook')??matching.at(-1);
     const css=dom.kind==='style'?candidates.findLast(e=>/\.(css|scss|sass|less)$/.test(e.filePath??'')):undefined;
     const cssIsNewer=!!css&&(!exact||Date.parse(css.timestamp)>Date.parse(exact.timestamp)||(css.timestamp===exact.timestamp&&css.sequence>exact.sequence));
-    const trigger=cssIsNewer?css:exact??css;
+    const trigger=generic?explicitTrigger:cssIsNewer?css:exact??css;
     if(!trigger){
       // Bounded race buffer; unmatched interaction changes expire without becoming events.
       for(const [id,item]of this.pendingDom)if(now-item.receivedAt>=2000)this.pendingDom.delete(id);
@@ -55,12 +60,12 @@ export class Collector {
     }
     this.pendingDom.delete(dom.id);
     this.seenDom.add(dom.id);if(this.seenDom.size>4000)this.seenDom.delete(this.seenDom.values().next().value!);
-    const mappedToSource=trigger===exact;
+    const mappedToSource=generic?dom.mapping==='instrumented'&&dom.filePath===trigger.filePath:trigger===exact;
     const isAgent=trigger.source==='agent-hook';
     return this.emit({eventId:'dom:'+createHash('sha256').update(dom.id).digest('hex'),sessionId:this.sessionId,
       agentId:isAgent?trigger.agentId:'file-observer',timestamp:dom.capturedAt,
       eventType:dom.kind==='style'?'style.changed':dom.kind==='created'||dom.kind==='image'?'component.detected':'component.updated',
       filePath:trigger.filePath,componentName:dom.componentName,status:dom.kind==='deleted'?'removed':'observed',source:'runtime',confidence:'measured',
-      metadata:{dom,triggerEventId:trigger.eventId,mapping:mappedToSource?dom.mapping:'inferred',reason:!mappedToSource?'Style difference observed during Vite HMR after a CSS change; target source attribution and exact causation are inferred.':isAgent?'DOM change observed during Vite HMR and correlated to a reported agent file change; temporal correlation does not prove exact AI causation.':'DOM change observed during Vite HMR and mapped to source; file author and exact causation are unknown.'}});
+      metadata:{dom,triggerEventId:trigger.eventId,mapping:mappedToSource?dom.mapping:'inferred',reason:generic?'DOM difference measured near a real file change using the generic bridge; source correlation is inferred unless explicitly instrumented. No AI was called.':!mappedToSource?'Style difference observed during Vite HMR after a CSS change; target source attribution and exact causation are inferred.':isAgent?'DOM change observed during Vite HMR and correlated to a reported agent file change; temporal correlation does not prove exact AI causation.':'DOM change observed during Vite HMR and mapped to source; file author and exact causation are unknown.'}});
   }
 }

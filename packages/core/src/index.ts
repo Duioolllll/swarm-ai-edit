@@ -20,6 +20,8 @@ export const DomChangeSchema = z.object({
   viewport:z.object({width:z.number().positive().max(20000),height:z.number().positive().max(20000)}),
   capturedAt:z.string().datetime(),mapping:z.enum(['instrumented','inferred','unknown']),
   hmrId:z.string().max(120).optional(),
+  observation:z.enum(['hmr','file-change']).optional(),
+  triggerEventId:z.string().min(1).max(120).optional(),
 });
 export type DomChange = z.infer<typeof DomChangeSchema>;
 export type Rect = z.infer<typeof RectSchema>;
@@ -34,7 +36,7 @@ export function stateForEvent(type: EventType): AgentState {
   return 'Idle';
 }
 export function isSensitivePath(path:string):boolean {
-  return path.split(/[\\/]/).some(p=> /^(node_modules|\.git|\.swarmwatch|dist|coverage|\.ssh|\.aws)$/.test(p)||/^\.env(?:\.|$)/i.test(p)||/^(credentials|secrets?)(?:\.|$)/i.test(p)||/\.(pem|key|p12|pfx)$/i.test(p));
+  return path.split(/[\\/]/).some(p=> /^(node_modules|\.git|\.swarmwatch|dist|build|out|coverage|vendor|\.next|\.nuxt|\.output|\.svelte-kit|\.astro|\.vercel|\.ssh|\.aws)$/.test(p)||/^\.env(?:\.|$)/i.test(p)||/^(credentials|secrets?)(?:\.|$)/i.test(p)||/\.(pem|key|p12|pfx)$/i.test(p));
 }
 export function safeRelativePath(path:string):boolean {
   return !!path && !path.includes('\0') && !path.includes('\\') && !path.startsWith('/') && !/^[a-z]:/i.test(path) && !path.split('/').includes('..') && !isSensitivePath(path);

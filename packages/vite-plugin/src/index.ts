@@ -3,21 +3,10 @@ import MagicString from 'magic-string';
 import path from 'node:path';
 import type { Plugin } from 'vite';
 import { clientBridge } from './client.js';
+import { dashboardOrigins } from '@swarmwatch/bridge';
+export { dashboardOrigins } from '@swarmwatch/bridge';
 
 export type SwarmwatchOptions = { dashboardOrigin?: string | string[] };
-
-/** The dashboard is bound on IPv4 loopback; its two URL aliases share a capability. */
-export function dashboardOrigins(configured?: string | string[]): string[] {
-  const values = Array.isArray(configured) ? configured : configured ? [configured] : ['http://localhost:4317'];
-  return [...new Set(values.flatMap(value => {
-    const url = new URL(value);
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || !['http:', 'https:'].includes(url.protocol)) throw new Error('SwarmWatch dashboardOrigin must be a loopback HTTP(S) origin');
-    if (url.hostname === '[::1]') return [url.origin];
-    const alias = new URL(url.origin);
-    alias.hostname = url.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
-    return [url.origin, alias.origin];
-  }))];
-}
 
 /** Transform output only. The user's source files are never edited. */
 export function instrumentJsx(code: string, filePath: string) {

@@ -10,7 +10,8 @@
   "dependencies": {
     "@swarmwatch/core": "0.1.0",
     "chokidar": "6.0.0",
-    "ws": "8.23.0"
+    "ws": "8.23.0",
+    "@swarmwatch/bridge": "0.1.0"
   },
   "license": "MIT",
   "private": true,
