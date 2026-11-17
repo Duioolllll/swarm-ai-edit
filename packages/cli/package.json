@@ -4,7 +4,7 @@
   "description": "Watch real development changes, live.",
   "type": "module",
   "bin": {
-    "swarmwatch": "dist/index.js"
+    "swarmwatch": "bin/swarmwatch.mjs"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\""
