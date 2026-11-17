@@ -28,3 +28,7 @@ Server 테스트는 SQLite 종료 후 재개, 재전송 중복, agent와 file ob
 미검증/미지원: 실제 provider 인증 Codex/OpenCode 작업, Next.js, 외부 사이트, 대규모 장시간 부하, 과거 HTML/CSS/미디어 snapshot 복원. 세션 replay는 이벤트·geometry 기록이며 원래 과거 화면 재현이 아닙니다. 테스트 명령 exit code는 test runner assertion 개수를 증명하지 않습니다. HMR/파일 시간 상관관계도 정확한 AI 인과관계를 증명하지 않습니다.
 
 이 결과는 명시된 Linux 환경에서의 실행 근거입니다. 다른 OS 및 실제 provider 인증 실행까지 검증한 결과는 아닙니다.
+
+## 소스 배포 재검증
+
+2026-11-17에 커밋된 소스만 새 디렉터리에 Git clone하여 검증했습니다. 기존 dist 출력 없이 `npm ci` → 전체 build → 타입 검사 → 28개 모듈/브리지 테스트를 통과했습니다. 소스에 포함된 CLI launcher로 초기 설치의 bin link를 만들고 `npx --no-install swarmwatch --help`와 실제 파일 변경 Playwright 통합 테스트 1개도 통과했습니다. 일반 registry의 `npx swarmwatch` 패키지를 검증한 결과는 아닙니다.
