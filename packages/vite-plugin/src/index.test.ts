@@ -1,3 +1,7 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createServer } from 'vite';
 import { describe, expect, it, vi } from 'vitest';
 import { dashboardOrigins, instrumentJsx, swarmwatch } from './index.js';
 
@@ -36,5 +40,29 @@ describe('Vite development instrumentation', () => {
       expect(script).toContain('["http://127.0.0.1:4891","http://localhost:4891"]');
       expect(script).not.toContain('"http://localhost:4317"');
     } finally { vi.unstubAllEnvs(); }
+  });
+  it('serves the bridge and Vite HMR client under the configured base', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'swarmwatch-vite-base-'));
+    const server = await createServer({root, base: '/preview/', configFile: false, server:{host:'127.0.0.1', port:0}, plugins:[swarmwatch()]});
+    try {
+      await writeFile(join(root, 'index.html'), '<!doctype html><html><body><main>Preview</main></body></html>');
+      await server.listen();
+      const url = server.resolvedUrls!.local[0]!;
+      const page = await fetch(url);
+      expect(page.ok).toBe(true);
+      const bridgePath = (await page.text()).match(/src="([^"]+@swarmwatch\/bridge)"/)?.[1];
+      expect(bridgePath).toBe('/preview/@swarmwatch/bridge');
+      const bridge = await fetch(new URL(bridgePath!, url));
+      expect(bridge.headers.get('content-type')).toContain('javascript');
+      const clientPath = (await bridge.text()).match(/from "([^"]+@vite\/client)"/)?.[1];
+      expect(clientPath).toBe('/preview/@vite/client');
+      const client = await fetch(new URL(clientPath!, url));
+      expect(client.ok).toBe(true);
+      expect(client.headers.get('content-type')).toContain('javascript');
+      await client.text();
+    } finally {
+      await server.close();
+      await rm(root, {recursive:true, force:true});
+    }
   });
 });

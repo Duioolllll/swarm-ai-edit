@@ -55,6 +55,7 @@ export class AnimationScheduler<T extends {agentId:string}> {
   push(item:T){const q=this.queues.get(item.agentId)??[]; q.push(item); if(q.length>this.limit)q.shift();this.queues.set(item.agentId,q);}
   next(agentId:string){return this.queues.get(agentId)?.shift();}
   clear(){this.queues.clear();}
+  get hasPending(){return [...this.queues.values()].some(queue=>queue.length>0);}
   get agents(){return [...this.queues.keys()];}
 }
 export function orderedUnique(events:SwarmEvent[]):SwarmEvent[]{

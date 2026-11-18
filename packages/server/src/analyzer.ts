@@ -20,7 +20,7 @@ export function supportedFileInfo(path:string):FileInfo|undefined{
 export type FileSnapshot={bytes:number;content?:Buffer;unavailable?:'file-limit'|'binary'};
 /** Read one small regular file; reject final symlinks and paths escaping the allowed root. */
 export async function readBoundedSnapshot(path:string,root:string,maxBytes=256*1024):Promise<FileSnapshot>{
-  const handle=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);
+  const handle=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
   try{
     const descriptor=await handle.stat();const current=await lstat(path);const canonical=await realpath(path);
     if(!descriptor.isFile()||current.isSymbolicLink()||descriptor.ino!==current.ino||descriptor.dev!==current.dev||!canonical.startsWith(root+sep))throw new Error('File escaped project confinement');
@@ -62,7 +62,6 @@ export class LocalChangeAnalyzer{
     this.maxFileBytes=options.maxFileBytes??256*1024;this.maxSnapshotBytes=options.maxSnapshotBytes??16*1024*1024;this.maxEntries=options.maxEntries??10000;this.maxDiffCells=options.maxDiffCells??1000000;
   }
   get usage(){return {snapshotBytes:this.retainedBytes,entries:this.snapshots.size};}
-  has(path:string){return this.snapshots.has(path);}
   observe(path:string,snapshot:FileSnapshot|undefined,operation:'baseline'|'created'|'modified'|'deleted'):Analysis|undefined{
     const info=supportedFileInfo(path);if(!info)return;
     const previous=this.snapshots.get(path);

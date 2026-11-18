@@ -52,30 +52,194 @@ function Cursor({active,width}:{active:Active;width:number}){const d=active.dom;
 function App(){
   const [state,setState]=useState<State|null>(null),[events,setEvents]=useState<SwarmEvent[]>([]),[connection,setConnection]=useState<'connecting'|'connected'|'disconnected'>('connecting');
   const [error,setError]=useState(''),[bridge,setBridge]=useState(false),[viewport,setViewport]=useState<'desktop'|'tablet'|'mobile'>('desktop'),[canvasSize,setCanvasSize]=useState({width:1100,height:850});
-  const [mode,setMode]=useState<'live'|'replay'>('live'),[paused,setPaused]=useState(false),[speed,setSpeed]=useState(1),[playhead,setPlayhead]=useState(0),[sessions,setSessions]=useState<SavedSession[]>([]),[replaySession,setReplaySession]=useState('');
+  const [mode,setMode]=useState<'live'|'replay'>('live'),[paused,setPaused]=useState(false),[speed,setSpeed]=useState(1),[playhead,setPlayhead]=useState(0),[sessions,setSessions]=useState<SavedSession[]>([]),[replaySession,setReplaySession]=useState(''),[replayLoading,setReplayLoading]=useState(false);
   const [agentFilter,setAgentFilter]=useState('all'),[typeFilter,setTypeFilter]=useState('all'),[selected,setSelected]=useState<SwarmEvent|null>(null),[active,setActive]=useState<Record<string,Active>>({}),[now,setNow]=useState(Date.now()),[showActivity,setShowActivity]=useState(false);
-  const frame=useRef<HTMLIFrameElement>(null),canvas=useRef<HTMLDivElement>(null),socket=useRef<WebSocket|null>(null),seq=useRef(0),scheduler=useRef(new AnimationScheduler<SwarmEvent>()),modeRef=useRef(mode),pausedRef=useRef(paused),activeRef=useRef<Record<string,Active>>({}),liveEvents=useRef<SwarmEvent[]>([]),replayIndex=useRef(-1),replayData=useRef<SwarmEvent[]>([]),activeKey=useRef(0),seenAnimations=useRef(new Set<string>()),pausedAt=useRef<number|null>(null),playbackRate=useRef(1),bridgeReady=useRef(false);
+  const frame=useRef<HTMLIFrameElement>(null),canvas=useRef<HTMLDivElement>(null),socket=useRef<WebSocket|null>(null),seq=useRef(0),scheduler=useRef(new AnimationScheduler<SwarmEvent>()),modeRef=useRef(mode),pausedRef=useRef(paused),activeRef=useRef<Record<string,Active>>({}),liveEvents=useRef<SwarmEvent[]>([]),replayIndex=useRef(-1),replayAtEnd=useRef(false),replayRequest=useRef(0),activeKey=useRef(0),seenAnimations=useRef(new Set<string>()),pausedAt=useRef<number|null>(null),playbackRate=useRef(1),bridgeReady=useRef(false);
   modeRef.current=mode;pausedRef.current=paused;playbackRate.current=mode==='replay'?speed:1;bridgeReady.current=bridge;
   useEffect(()=>{if(paused){pausedAt.current=Date.now();return;}if(pausedAt.current!==null){const delta=Date.now()-pausedAt.current;const resumed=Object.fromEntries(Object.entries(activeRef.current).map(([id,a])=>[id,{...a,until:a.until+delta}]));activeRef.current=resumed;setActive(resumed);pausedAt.current=null;}},[paused]);
   const enqueue=useCallback((e:SwarmEvent)=>{if(!isVisualEvent(e))return;const dom=DomChangeSchema.parse(e.metadata.dom);const key=JSON.stringify([e.sessionId,e.agentId,dom.hmrId??dom.triggerEventId??e.eventId,dom.filePath??'',dom.componentName??'',dom.kind]);if(seenAnimations.current.has(key))return;seenAnimations.current.add(key);if(seenAnimations.current.size>2000)seenAnimations.current.delete(seenAnimations.current.values().next().value!);scheduler.current.push(e);},[]);
+  const resetAnimation=useCallback(()=>{scheduler.current.clear();seenAnimations.current.clear();pausedAt.current=pausedRef.current?Date.now():null;activeRef.current={};setActive({});},[]);
   useEffect(()=>{if(!showActivity)return;const close=(event:KeyboardEvent)=>{if(event.key==='Escape')setShowActivity(false);};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close);},[showActivity]);
   useEffect(()=>{const node=canvas.current;if(!node)return;const measure=()=>setCanvasSize({width:node.clientWidth-48,height:node.clientHeight-84});const resize=new ResizeObserver(measure);resize.observe(node);measure();return()=>resize.disconnect();},[]);
   const fetchSessions=useCallback(()=>{fetch('/api/sessions').then(r=>r.json()).then(d=>setSessions(Array.isArray(d)?d:d.sessions??[])).catch(()=>{});},[]);
-  useEffect(()=>{let stop=false,timer:ReturnType<typeof setTimeout>;async function start(){try{const r=await fetch('/api/state');if(!r.ok)throw Error(`Local server returned ${r.status}`);const data=await r.json() as State;if(stop)return;setState(data);setEvents(data.events??[]);liveEvents.current=data.events??[];seq.current=Math.max(0,...(data.events??[]).map(e=>e.sequence));connect(data);}catch(e){if(!stop){setError(String(e));setConnection('disconnected');timer=setTimeout(start,2500);}}}
-    function connect(data:State){if(stop)return;const protocol=location.protocol==='https:'?'wss:':'ws:';const ws=new WebSocket(`${protocol}//${location.host}/ws?token=${encodeURIComponent(data.token)}&sessionId=${encodeURIComponent(data.sessionId)}&after=${seq.current}`);socket.current=ws;let connectedAt=Date.now();ws.onopen=()=>{connectedAt=Date.now();setConnection('connected');setError('');fetchSessions();};ws.onmessage=msg=>{try{const payload=JSON.parse(msg.data);if(payload.type!=='events'||!Array.isArray(payload.events))return;const incoming=(payload.events as SwarmEvent[]).filter(e=>e.sequence>seq.current).sort((a,b)=>a.sequence-b.sequence);if(!incoming.length)return;seq.current=Math.max(seq.current,...incoming.map(e=>e.sequence));liveEvents.current=orderedUnique([...liveEvents.current,...incoming]).slice(-10000);if(modeRef.current==='live'){for(const e of incoming){const timestamp=Date.parse(e.timestamp);const age=Date.now()-timestamp;if(e.eventType.startsWith('file.')&&bridgeReady.current&&data.previewUrl&&timestamp>=connectedAt&&age>=-1000&&age<2500){try{frame.current?.contentWindow?.postMessage({channel:'swarmwatch',kind:'file-change',nonce:data.token,eventId:e.eventId,filePath:e.filePath,timestamp:e.timestamp},new URL(data.previewUrl).origin);}catch{}}}setEvents(liveEvents.current);if(!pausedRef.current)for(const e of incoming)enqueue(e);}}catch{}};ws.onclose=()=>{if(!stop){setConnection('disconnected');setBridge(false);timer=setTimeout(()=>connect(data),1500);}};ws.onerror=()=>ws.close();}
-    start();return()=>{stop=true;clearTimeout(timer);socket.current?.close();};},[fetchSessions,enqueue]);
+  useEffect(()=>{
+    const controller=new AbortController();
+    let timer:ReturnType<typeof setTimeout>,current:State|undefined;
+    async function start(){
+      try{
+        const response=await fetch('/api/state',{signal:controller.signal});
+        if(!response.ok)throw Error(`Local server returned ${response.status}`);
+        const data=await response.json() as State;
+        if(controller.signal.aborted)return;
+        if(current?.sessionId!==data.sessionId||current.token!==data.token){
+          current=data;
+          bridgeReady.current=false;
+          setBridge(false);
+          setState(data);
+          liveEvents.current=data.events??[];
+          seq.current=liveEvents.current.reduce((last,event)=>Math.max(last,event.sequence),0);
+          if(modeRef.current==='live'){
+            resetAnimation();
+            setEvents(liveEvents.current);
+            setSelected(null);
+            setAgentFilter('all');
+          }
+        }
+        connect(data);
+      }catch(error){
+        if(controller.signal.aborted)return;
+        setError(String(error));
+        setConnection('disconnected');
+        timer=setTimeout(start,2500);
+      }
+    }
+    function connect(data:State){
+      if(controller.signal.aborted)return;
+      const protocol=location.protocol==='https:'?'wss:':'ws:';
+      const previewOrigin=data.previewUrl?new URL(data.previewUrl).origin:undefined;
+      const ws=new WebSocket(`${protocol}//${location.host}/ws?token=${encodeURIComponent(data.token)}&sessionId=${encodeURIComponent(data.sessionId)}&after=${seq.current}`);
+      socket.current=ws;
+      let connectedAt:number|undefined;
+      ws.onopen=()=>{
+        if(controller.signal.aborted)return;
+        connectedAt=Date.now();
+        setConnection('connected');
+        setError('');
+        fetchSessions();
+      };
+      ws.onmessage=msg=>{
+        if(controller.signal.aborted)return;
+        try{
+          const payload=JSON.parse(msg.data);
+          if(payload.type!=='events'||!Array.isArray(payload.events))return;
+          const incoming=(payload.events as SwarmEvent[]).filter(e=>e.sequence>seq.current).sort((a,b)=>a.sequence-b.sequence);
+          if(!incoming.length)return;
+          seq.current=incoming[incoming.length-1].sequence;
+          liveEvents.current=orderedUnique([...liveEvents.current,...incoming]).slice(-10000);
+          if(bridgeReady.current&&previewOrigin&&connectedAt!==undefined){
+            const now=Date.now();
+            for(const event of incoming){
+              const timestamp=Date.parse(event.timestamp);
+              const age=now-timestamp;
+              if(event.eventType.startsWith('file.')&&timestamp>=connectedAt&&age>=-1000&&age<2500){
+                frame.current?.contentWindow?.postMessage({channel:'swarmwatch',kind:'file-change',nonce:data.token,eventId:event.eventId,filePath:event.filePath,timestamp:event.timestamp},previewOrigin);
+              }
+            }
+          }
+          if(modeRef.current==='live'){
+            setEvents(liveEvents.current);
+            if(!pausedRef.current)for(const event of incoming)enqueue(event);
+          }
+        }catch{}
+      };
+      ws.onclose=()=>{
+        if(controller.signal.aborted)return;
+        setConnection('disconnected');
+        setBridge(false);
+        // Resume from the last sequence after a dropped socket. If the upgrade
+        // fails, refresh the token and session before retrying.
+        timer=setTimeout(connectedAt===undefined?start:()=>connect(data),1500);
+      };
+      ws.onerror=()=>ws.close();
+    }
+    void start();
+    return()=>{
+      controller.abort();
+      clearTimeout(timer);
+      socket.current?.close();
+    };
+  },[fetchSessions,enqueue,resetAnimation]);
   const handshake=useCallback(()=>{if(!state?.previewUrl)return;try{frame.current?.contentWindow?.postMessage({channel:'swarmwatch',kind:'connect',nonce:state.token},new URL(state.previewUrl).origin);}catch{}},[state]);
   useEffect(()=>{if(!state)return;setBridge(false);const interval=setInterval(handshake,1500);const listener=(msg:MessageEvent)=>{let origin:string;try{origin=new URL(state.previewUrl).origin;}catch{return;}if(msg.source!==frame.current?.contentWindow||msg.origin!==origin||msg.data?.channel!=='swarmwatch'||msg.data?.nonce!==state.token)return;if(msg.data.kind==='ready'){setBridge(true);return;}if(msg.data.kind==='changes'&&Array.isArray(msg.data.changes)){setBridge(true);const changes=msg.data.changes.slice(0,100).map((d:unknown)=>DomChangeSchema.safeParse(d)).filter((d:{success:boolean})=>d.success).map((d:{data:DomChange})=>d.data);if(socket.current?.readyState===WebSocket.OPEN)for(let i=0;i<changes.length;i+=50)socket.current.send(JSON.stringify({type:'dom',changes:changes.slice(i,i+50)}));}};window.addEventListener('message',listener);handshake();return()=>{clearInterval(interval);window.removeEventListener('message',listener);};},[state,handshake]);
-  useEffect(()=>{const interval=setInterval(()=>{setNow(Date.now());if(pausedRef.current)return;const current={...activeRef.current};let changed=false;for(const [id,a]of Object.entries(current))if(a.until<Date.now()){delete current[id];changed=true;}for(const id of scheduler.current.agents){if(current[id])continue;const e=scheduler.current.next(id);if(e){const parsed=DomChangeSchema.safeParse(e.metadata.dom);if(parsed.success){current[id]={event:e,dom:parsed.data,until:Date.now()+1500/playbackRate.current,key:++activeKey.current};changed=true;}}}if(changed){activeRef.current=current;setActive(current);}},70);return()=>clearInterval(interval);},[]);
+  useEffect(()=>{
+    const interval=setInterval(()=>{
+      const now=Date.now();
+      setNow(now);
+      if(pausedRef.current)return;
+      const current={...activeRef.current};
+      let changed=false;
+      for(const [id,animation]of Object.entries(current)){
+        if(animation.until>now)continue;
+        delete current[id];
+        changed=true;
+      }
+      for(const id of scheduler.current.agents){
+        if(current[id])continue;
+        const event=scheduler.current.next(id);
+        if(!event)continue;
+        const parsed=DomChangeSchema.safeParse(event.metadata.dom);
+        if(!parsed.success)continue;
+        current[id]={event,dom:parsed.data,until:now+1500/playbackRate.current,key:++activeKey.current};
+        changed=true;
+      }
+      if(changed){activeRef.current=current;setActive(current);}
+      if(modeRef.current==='replay'&&replayAtEnd.current&&!scheduler.current.hasPending&&Object.keys(current).length===0)setPaused(true);
+    },70);
+    return()=>clearInterval(interval);
+  },[]);
   const timeStart=events.length?Math.min(...events.map(e=>Date.parse(e.timestamp))):0;
   const timeEnd=events.length?Math.max(...events.map(e=>Date.parse(e.timestamp))):0;
   const total=Math.max(1,timeEnd-timeStart);
-  useEffect(()=>{if(mode!=='replay'||paused)return;let last=performance.now();const id=setInterval(()=>{const t=performance.now();const dt=t-last;last=t;setPlayhead(p=>Math.min(total,p+dt*speed));},50);return()=>clearInterval(id);},[mode,paused,speed,total]);
-  useEffect(()=>{if(mode!=='replay'||!events.length)return;const offset=Date.parse(events[0].timestamp);const cutoff=offset+playhead;let index=replayIndex.current;while(index+1<events.length&&Date.parse(events[index+1].timestamp)<=cutoff){index++;const e=events[index];if(isVisualEvent(e)&&(!paused)&& (agentFilter==='all'||e.agentId===agentFilter)&&(typeFilter==='all'||e.eventType.startsWith(typeFilter)))enqueue(e);}replayIndex.current=index;if(playhead>=total)setPaused(true);},[playhead,events,mode,paused,total,agentFilter,typeFilter]);
-  const resetAnimation=()=>{scheduler.current.clear();seenAnimations.current.clear();pausedAt.current=pausedRef.current?Date.now():null;activeRef.current={};setActive({});};
-  const enterReplay=async(id?:string)=>{resetAnimation();setMode('replay');setPaused(true);setPlayhead(0);replayIndex.current=-1;fetchSessions();const session=id??state?.sessionId??'';setReplaySession(session);try{const response=await fetch(`/api/sessions/${encodeURIComponent(session)}/events`);if(!response.ok)throw Error('Session could not be loaded');const data=await response.json();const list=orderedUnique(Array.isArray(data)?data:data.events??[]).sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp)||a.sequence-b.sequence);replayData.current=list;setEvents(list);}catch(e){setError(String(e));}};
-  const enterLive=()=>{resetAnimation();setMode('live');setPaused(false);setEvents(liveEvents.current);setPlayhead(0);setAgentFilter('all');};
-  const scrub=(value:number)=>{resetAnimation();setPlayhead(value);replayIndex.current=events.findLastIndex(e=>Date.parse(e.timestamp)<=Date.parse(events[0]?.timestamp??'')+value);const event=events[replayIndex.current];if(event?.metadata.dom){const parsed=DomChangeSchema.safeParse(event.metadata.dom);if(parsed.success){const snapshot={event,dom:parsed.data,until:Date.now()+1500/playbackRate.current,key:++activeKey.current};activeRef.current={[event.agentId]:snapshot};setActive(activeRef.current);}}setSelected(event??null);};
+  useEffect(()=>{if(mode!=='replay'||paused||replayLoading)return;let last=performance.now();const id=setInterval(()=>{const t=performance.now();const dt=t-last;last=t;setPlayhead(p=>Math.min(total,p+dt*speed));},50);return()=>clearInterval(id);},[mode,paused,replayLoading,speed,total]);
+  useEffect(()=>{
+    if(mode!=='replay'||paused||replayLoading)return;
+    const cutoff=timeStart+playhead;
+    while(replayIndex.current+1<events.length&&Date.parse(events[replayIndex.current+1].timestamp)<=cutoff){
+      const event=events[++replayIndex.current];
+      if((agentFilter==='all'||event.agentId===agentFilter)&&(typeFilter==='all'||event.eventType.startsWith(typeFilter)))enqueue(event);
+    }
+    replayAtEnd.current=playhead>=total;
+  },[playhead,events,mode,paused,replayLoading,total,timeStart,agentFilter,typeFilter,enqueue]);
+  const enterReplay=async(id?:string)=>{
+    const session=id??state?.sessionId;
+    if(!session)return;
+    const request=++replayRequest.current;
+    resetAnimation();
+    replayAtEnd.current=false;
+    replayIndex.current=-1;
+    setMode('replay');
+    setPaused(true);
+    setPlayhead(0);
+    setReplaySession(session);
+    setReplayLoading(true);
+    setEvents([]);
+    setSelected(null);
+    fetchSessions();
+    try{
+      const response=await fetch(`/api/sessions/${encodeURIComponent(session)}/events`);
+      if(!response.ok)throw Error('Session could not be loaded');
+      const data=await response.json();
+      if(request!==replayRequest.current)return;
+      const list=orderedUnique(Array.isArray(data)?data:data.events??[]).sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp)||a.sequence-b.sequence);
+      setEvents(list);
+    }catch(error){
+      if(request===replayRequest.current)setError(String(error));
+    }finally{
+      if(request===replayRequest.current)setReplayLoading(false);
+    }
+  };
+  const enterLive=()=>{
+    replayRequest.current++;
+    replayAtEnd.current=false;
+    resetAnimation();
+    setMode('live');
+    setReplayLoading(false);
+    setPaused(false);
+    setEvents(liveEvents.current);
+    setPlayhead(0);
+    setAgentFilter('all');
+  };
+  const togglePlayback=()=>{
+    const finishingReplay=replayAtEnd.current&&(scheduler.current.hasPending||Object.keys(activeRef.current).length>0);
+    if(mode==='replay'&&paused&&playhead>=total&&!finishingReplay){
+      resetAnimation();
+      replayAtEnd.current=false;
+      replayIndex.current=-1;
+      setPlayhead(0);
+    }
+    setPaused(!paused);
+  };
+  const scrub=(value:number)=>{resetAnimation();replayAtEnd.current=false;setPlayhead(value);replayIndex.current=events.findLastIndex(e=>Date.parse(e.timestamp)<=timeStart+value);const event=events[replayIndex.current];if(event?.metadata.dom){const parsed=DomChangeSchema.safeParse(event.metadata.dom);if(parsed.success){const snapshot={event,dom:parsed.data,until:Date.now()+1500/playbackRate.current,key:++activeKey.current};activeRef.current={[event.agentId]:snapshot};setActive(activeRef.current);}}setSelected(event??null);};
   const visibleEvents=useMemo(()=>events.filter(e=>(agentFilter==='all'||e.agentId===agentFilter)&&(typeFilter==='all'||e.eventType.startsWith(typeFilter))&&(mode==='live'||Date.parse(e.timestamp)<=Date.parse(events[0]?.timestamp??'')+playhead)),[events,agentFilter,typeFilter,mode,playhead]);
   const actualAgentIds=useMemo(()=>new Set(events.filter(e=>e.source==='agent-hook'&&e.eventType==='agent.started').map(e=>e.agentId)),[events]);
   const agents=useMemo(()=>{const map=new Map<string,SwarmEvent>();for(const e of visibleEvents)if(actualAgentIds.has(e.agentId))map.set(e.agentId,e);return [...map.entries()];},[visibleEvents,actualAgentIds]);
@@ -92,7 +256,7 @@ function App(){
       <aside className="left-panel"><div className="panel-heading"><span>WORKSPACE</span><span className="tiny-number">01</span></div><div className="left-intro"><span className="eyebrow">YOUR LOCAL SESSION</span><h1>Watch it<br/>come together<span>.</span></h1><p>Every change. In plain sight.</p></div><div className="section-heading"><span>AGENTS</span><span className="count">{agents.length.toString().padStart(2,'0')}</span></div><div className="agent-list">{agents.length===0?<div className="empty-agents"><span className="empty-orbit">⌁</span><strong>No agents connected</strong><p>Code changes, observed locally.<br/>No AI calls by SwarmWatch.</p></div>:agents.map(([id,e])=><button key={id} className={`agent-card ${agentFilter===id?'selected':''}`} onClick={()=>setAgentFilter(agentFilter===id?'all':id)}><span className="agent-avatar" style={{color:colorFor(id)}}><Icon name="arrow" size={15}/></span><span><strong>{agentLabel(id)}</strong><small><span style={{background:colorFor(id)}} className="small-dot"/>{stateForEvent(e.eventType)}</small></span><span className="agent-connected">↗</span></button>)}</div><div className="observer-card"><span className="observer-symbol">◉</span><span><strong>File observer</strong><small>{connection==='connected'?'Local change detection':'Reconnecting…'}</small></span><span className="observer-badge">INFERRED</span></div><div className="section-heading files-heading"><span>CHANGED FILES</span><span className="count">{fileMap.length.toString().padStart(2,'0')}</span></div><div className="file-tree">{fileMap.length===0?<p className="empty-files">No changes yet.<br/>Edit a project file to begin.</p>:fileMap.map(([path,e])=><button key={path} onClick={()=>{setSelected(e);setShowActivity(true);}} title={path}><Icon name="file" size={14}/><span>{path}</span><b className={e.eventType==='file.deleted'?'file-deleted':''}>{e.eventType==='file.created'?'A':e.eventType==='file.deleted'?'D':'M'}</b></button>)}</div><div className="local-footnote"><span className="status-dot online"/><span>LOCAL BY DESIGN</span><small>127.0.0.1 · no cloud required</small></div></aside>
       <main className="workspace"><div className="workspace-heading"><div className="mode-tabs" role="tablist" aria-label="Workspace mode"><button role="tab" aria-selected={mode==='live'} className={mode==='live'?'active':''} onClick={enterLive}><Icon name="monitor" size={14}/> Live preview</button><button role="tab" aria-selected={mode==='replay'} className={mode==='replay'?'active':''} onClick={()=>enterReplay()}><Icon name="refresh" size={13}/> Replay</button></div><span className="workspace-caption">OBSERVE / UNDERSTAND / BUILD</span><button className="activity-toggle" aria-controls="activity-panel" aria-expanded={showActivity} onClick={()=>setShowActivity(true)}><Icon name="layers" size={13}/> Changes <span>{visibleEvents.length}</span></button></div><div className="preview-toolbar"><div className="preview-address"><span className={`small-dot ${bridge?'bridge-dot':''}`}/><span>{previewOrigin}</span><span className="preview-secure">LOCAL</span></div><div className="viewport-buttons" role="group" aria-label="Preview viewport">{(['desktop','tablet','mobile']as const).map(v=><button key={v} disabled={!state?.previewUrl} onClick={()=>{setViewport(v);resetAnimation();}} className={v===viewport?'selected':''} title={v} aria-label={`${v} viewport`} aria-pressed={v===viewport}><Icon name={v==='desktop'?'monitor':v}/></button>)}</div><span className="viewport-dimensions">{width} × 680</span><button className="icon-button" onClick={()=>{setBridge(false);if(frame.current)frame.current.src=state?.previewUrl??'';}} title="Reload preview" aria-label="Reload preview"><Icon name="refresh" size={14}/></button><a className="icon-button" href={state?.previewUrl} target="_blank" rel="noreferrer" title="Open app in new tab" aria-label="Open application"><Icon name="external" size={14}/></a></div>
       <div className="canvas-area" ref={canvas}><div className="canvas-coordinates"><span>0, 0</span><span>{viewport.toUpperCase()} VIEWPORT</span></div>{mode==='replay'&&<div className="replay-notice"><Icon name="refresh" size={12}/><span>EVENT REPLAY · Preview shows the current app. Historical screen snapshots are not recorded.</span></div>}<div className={`preview-wrap viewport-${viewport}`} style={{width:width*fit,height:709*fit+2}}><div className="preview-screen" style={{width,transform:`scale(${fit})`}}><div className="preview-frame-top"><span/><span/><span/><div>{state?.projectName??'application'} / preview</div><b>{mode==='replay'?'CURRENT APP':'LIVE'}</b></div><div className="frame-stage" style={{width,height:680}}>{state?.previewUrl?<iframe ref={frame} src={state.previewUrl} title="Live development application" onLoad={()=>{setBridge(false);handshake();}} sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"/>:<div className="preview-empty"><SwarmMark/><h2>Watching files. Locally.</h2><p>Code changes in any language appear here.</p><p className="watch-preview-hint">A browser preview is optional. SwarmWatch makes no AI calls in local watch mode.</p><div className="local-change-list">{visibleEvents.filter(e=>e.eventType.startsWith('file.')).slice(-4).reverse().map(e=><button key={e.eventId} onClick={()=>{setSelected(e);setShowActivity(true);}}><Icon name="file" size={14}/><span><strong>{e.filePath}</strong><AnalysisSummary event={e} compact/></span><Icon name="arrow" size={12}/></button>)}</div></div>}<div className={`cursor-layer ${paused?'paused':''}`} data-testid="cursor-layer" data-paused={paused} style={{'--playback-rate':mode==='replay'?speed:1} as React.CSSProperties}>{Object.values(active).filter(a=>(agentFilter==='all'||a.event.agentId===agentFilter)&&(typeFilter==='all'||a.event.eventType.startsWith(typeFilter))).map(a=><Cursor key={a.event.agentId} active={a} width={width}/>)}</div></div></div></div><div className="canvas-footer"><span data-testid="bridge-status" data-connected={bridge}><Icon name="layers" size={12}/>{bridge?'Instrumentation connected':'Waiting for client bridge'}</span><span>ACTUAL APP. OBSERVED CHANGES.</span></div></div>
-      <section className="timeline"><div className="timeline-controls"><div className="timeline-label"><span className={`status-dot ${mode==='live'?'online':''}`}/><strong>{mode==='live'?'LIVE TIMELINE':'SESSION REPLAY'}</strong><span>{visibleEvents.length} events</span></div><div className="timeline-actions">{mode==='replay'&&<select aria-label="Recorded session" value={replaySession} onChange={e=>enterReplay(e.target.value)}>{sessions.map(s=><option key={s.sessionId??s.id} value={s.sessionId??s.id}>{(s.sessionId??s.id??'').slice(0,8)} · {s.projectName??'session'}</option>)}</select>}<select aria-label="Playback speed" value={speed} onChange={e=>setSpeed(Number(e.target.value))}>{[1,2,4].map(s=><option key={s} value={s}>{s}×</option>)}</select><button className="playback-button" onClick={()=>{if(mode==='replay'&&playhead>=total){setPlayhead(0);replayIndex.current=-1;}setPaused(!paused);}} aria-label={paused?'Resume visualization':'Pause visualization'}><Icon name={paused?'play':'pause'} size={13}/><span>{paused?'Resume':'Pause'}</span></button><button className="icon-button" onClick={exportSession} aria-label="Download event recording" title="Download event recording"><Icon name="download" size={14}/></button></div></div><div className="timeline-track"><div className="timeline-baseline"/>{events.slice(-250).map((e,i)=>{const pct=events.length>1?(Date.parse(e.timestamp)-timeStart)/total*100:0;return <button key={e.eventId} className={`timeline-tick ${e.eventType.includes('failed')||e.eventType==='error.detected'?'tick-error':''}`} style={{left:`${Math.min(99.6,pct)}%`,height:10+(i%3)*5,background:e.source==='agent-hook'?colorFor(e.agentId):undefined}} title={`${eventTitle(e)} · ${shortPath(e.filePath)}`} aria-label={`${eventTitle(e)} at ${timeLabel(e.timestamp)}`} onClick={()=>{setSelected(e);if(mode==='replay')scrub(Date.parse(e.timestamp)-timeStart);}}/>;})}<div className="timeline-playhead" style={{left:mode==='live'?'99.8%':`${playhead/total*100}%`}}/>{mode==='replay'&&<input className="timeline-scrubber" aria-label="Replay position" type="range" min={0} max={total} value={playhead} onChange={e=>scrub(Number(e.target.value))}/>}</div><div className="timeline-ruler"><span>{timeStart?timeLabel(new Date(timeStart).toISOString()):'00:00:00'}</span><span>{mode==='live'?(paused?'VISUALIZATION PAUSED · EVENTS STILL RECORDING':'RECORDING EVERY OBSERVED CHANGE'):`${formatElapsed(playhead)} / ${formatElapsed(total)}`}</span><span>{timeEnd?timeLabel(new Date(timeEnd).toISOString()):'00:00:00'}</span></div></section></main>
+      <section className="timeline"><div className="timeline-controls"><div className="timeline-label"><span className={`status-dot ${mode==='live'?'online':''}`}/><strong>{mode==='live'?'LIVE TIMELINE':'SESSION REPLAY'}</strong><span>{visibleEvents.length} events</span></div><div className="timeline-actions">{mode==='replay'&&<select aria-label="Recorded session" value={replaySession} onChange={e=>enterReplay(e.target.value)}>{sessions.map(s=><option key={s.sessionId??s.id} value={s.sessionId??s.id}>{(s.sessionId??s.id??'').slice(0,8)} · {s.projectName??'session'}</option>)}</select>}<select aria-label="Playback speed" value={speed} onChange={e=>setSpeed(Number(e.target.value))}>{[1,2,4].map(s=><option key={s} value={s}>{s}×</option>)}</select><button className="playback-button" onClick={togglePlayback} disabled={replayLoading} aria-label={paused?'Resume visualization':'Pause visualization'}><Icon name={paused?'play':'pause'} size={13}/><span>{paused?'Resume':'Pause'}</span></button><button className="icon-button" onClick={exportSession} aria-label="Download event recording" title="Download event recording"><Icon name="download" size={14}/></button></div></div><div className="timeline-track"><div className="timeline-baseline"/>{events.slice(-250).map((e,i)=>{const pct=events.length>1?(Date.parse(e.timestamp)-timeStart)/total*100:0;return <button key={e.eventId} className={`timeline-tick ${e.eventType.includes('failed')||e.eventType==='error.detected'?'tick-error':''}`} style={{left:`${Math.min(99.6,pct)}%`,height:10+(i%3)*5,background:e.source==='agent-hook'?colorFor(e.agentId):undefined}} title={`${eventTitle(e)} · ${shortPath(e.filePath)}`} aria-label={`${eventTitle(e)} at ${timeLabel(e.timestamp)}`} onClick={()=>{setSelected(e);if(mode==='replay')scrub(Date.parse(e.timestamp)-timeStart);}}/>;})}<div className="timeline-playhead" style={{left:mode==='live'?'99.8%':`${playhead/total*100}%`}}/>{mode==='replay'&&<input className="timeline-scrubber" aria-label="Replay position" type="range" min={0} max={total} value={playhead} onChange={e=>scrub(Number(e.target.value))}/>}</div><div className="timeline-ruler"><span>{timeStart?timeLabel(new Date(timeStart).toISOString()):'00:00:00'}</span><span>{mode==='live'?(paused?'VISUALIZATION PAUSED · EVENTS STILL RECORDING':'RECORDING EVERY OBSERVED CHANGE'):`${formatElapsed(playhead)} / ${formatElapsed(total)}`}</span><span>{timeEnd?timeLabel(new Date(timeEnd).toISOString()):'00:00:00'}</span></div></section></main>
       <aside id="activity-panel" className={`right-panel ${showActivity?'activity-open':''}`}><div className="panel-heading"><span>ACTIVITY</span><button className="activity-close icon-button" onClick={()=>setShowActivity(false)} aria-label="Close activity panel"><Icon name="cross" size={13}/></button><span className="stream-live"><span className={`small-dot ${connection==='connected'?'bridge-dot':''}`}/>{mode==='live'?'LIVE':'REPLAY'}</span></div><div className="stream-title"><h2>Event stream</h2><span>{visibleEvents.length.toString().padStart(3,'0')}</span></div><div className="event-filters"><select aria-label="Filter event type" value={typeFilter} onChange={e=>setTypeFilter(e.target.value)}><option value="all">All activity</option><option value="file.">Files</option><option value="component.">Components</option><option value="style.">Styles</option><option value="test.">Tests</option><option value="build.">Builds</option><option value="agent.">Agents</option><option value="error.">Errors</option></select><select aria-label="Filter agent" value={agentFilter} onChange={e=>setAgentFilter(e.target.value)}><option value="all">All sources</option><option value="file-observer">File observer</option>{[...actualAgentIds].map(id=><option key={id} value={id}>{agentLabel(id)}</option>)}</select></div><div className="event-stream" role="log" aria-label="Development events">{visibleEvents.length===0?<div className="stream-empty"><div className="empty-event-mark"><i/><i/><i/></div><h3>Ready when you are.</h3><p>Real development events will appear here as your project changes.</p><span>NO SYNTHETIC ACTIVITY</span></div>:visibleEvents.slice(-150).reverse().map(e=><button key={e.eventId} className={`event-row ${selected?.eventId===e.eventId?'selected':''}`} data-testid="event-row" data-event-type={e.eventType} onClick={()=>setSelected(selected?.eventId===e.eventId?null:e)}><span className={`event-symbol ${e.eventType.includes('failed')?'event-error':''}`}><Icon name={e.eventType==='test.passed'?'check':e.eventType.includes('failed')?'cross':e.source==='runtime'?'layers':'file'} size={13}/></span><div className="event-body"><div className="event-line"><strong>{eventTitle(e)}</strong><time>{timeLabel(e.timestamp)}</time></div><span className="event-path">{e.componentName??shortPath(e.filePath)}</span><AnalysisSummary event={e} compact/><div className="event-provenance"><span className="small-dot" style={{background:colorFor(e.agentId)}}/>{agentLabel(e.agentId)}<span className="provenance-label">{e.confidence}</span></div></div></button>)}</div>{selected&&<div className="event-detail"><div><span>EVENT DETAILS</span><button className="icon-button" onClick={()=>setSelected(null)} aria-label="Close event details"><Icon name="cross" size={12}/></button></div><strong>{selected.eventType}</strong><dl><dt>Source</dt><dd>{selected.source}</dd><dt>Confidence</dt><dd>{selected.confidence}</dd><dt>File</dt><dd>{selected.filePath??'Not identified'}</dd><dt>Sequence</dt><dd>#{selected.sequence}</dd></dl>{typeof selected.metadata.reason==='string'&&<p>{selected.metadata.reason}</p>}<AnalysisSummary event={selected}/></div>}<div className="checks-panel"><div className="section-heading"><span>TESTS & BUILDS</span><span className="count">{tests.length.toString().padStart(2,'0')}</span></div>{tests.length?tests.slice(-2).map(e=><div className="check-result" key={e.eventId}><Icon name={e.eventType.endsWith('passed')||e.eventType==='build.completed'&&e.status!=='failed'?'check':'file'} size={14}/><span>{eventTitle(e)}<small>{e.status} · {timeLabel(e.timestamp)}</small></span></div>):<p>No reported runs in this session.<br/>Results appear only after execution.</p>}</div></aside>
     </div>{showActivity&&<button className="activity-scrim" onClick={()=>setShowActivity(false)} aria-label="Close activity panel"/>}<footer className="statusbar"><span><span className={`small-dot ${connection==='connected'?'bridge-dot':''}`}/>{connection==='connected'?'Collector connected':'Collector reconnecting'}</span><span>{state?.sessionId?`SESSION ${state.sessionId.slice(0,8).toUpperCase()}`:'INITIALIZING'}</span><span>SWARMWATCH <b>v0.1.0</b><i>/</i> WATCH YOUR AGENTS BUILD.</span></footer>{error&&<div className="error-toast" role="alert"><Icon name="cross" size={14}/><span>{error}</span><button onClick={()=>setError('')} aria-label="Dismiss error">×</button></div>}
   </div>;

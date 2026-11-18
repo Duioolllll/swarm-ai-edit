@@ -8,7 +8,12 @@ import {LocalChangeAnalyzer,readBoundedSnapshot,supportedFileInfo} from './analy
 
 export async function watchProject(project:string,collector:Collector){
   const root=await realpath(project);const analyzer=new LocalChangeAnalyzer();
-  const watcher=chokidar.watch(root,{ignoreInitial:false,followSymlinks:false,awaitWriteFinish:{stabilityThreshold:100,pollInterval:25},ignored:(path)=>isSensitivePath(relative(root,path))});
+  const watcher=chokidar.watch(root,{
+    ignoreInitial:false,followSymlinks:false,awaitWriteFinish:{stabilityThreshold:100,pollInterval:25},
+    // Chokidar tracks regular files even when no analysis snapshot is retained.
+    // Exclude other node types at discovery so their unlink never counts as a file deletion.
+    ignored:(path,stats)=>isSensitivePath(relative(root,path))||!!stats&&!stats.isDirectory()&&!stats.isFile(),
+  });
   let ready=false,closed=false,pumping=false,reportedOverflow=false;
   const pending=new Map<string,{kind:'add'|'change'|'unlink';baseline:boolean}>();
   const waiters:(()=>void)[]=[];
@@ -18,7 +23,6 @@ export async function watchProject(project:string,collector:Collector){
     if(!safeRelativePath(path)||!supportedFileInfo(path)||closed)return;
     try{
       if(kind==='unlink'){
-        if(!analyzer.has(path))return;
         const analysis=analyzer.observe(path,undefined,'deleted');
         if(!baseline&&!closed&&analysis)collector.file('file.deleted',path,{analysis});return;
       }
@@ -38,7 +42,7 @@ export async function watchProject(project:string,collector:Collector){
     const relativePath=relative(root,path).split(sep).join('/');
     if(!safeRelativePath(relativePath)||!supportedFileInfo(relativePath))return;
     if(pending.size>=2000&&!pending.has(path)){
-      if(ready&&!reportedOverflow){reportedOverflow=true;reportError('watcher-backpressure','Local file-analysis queue reached its 2000-file bound; some changes were skipped.');}return;
+      if(!reportedOverflow){reportedOverflow=true;reportError('watcher-backpressure','Local file-analysis queue reached its 2000-file bound; some file analyses were skipped.');}return;
     }
     const previous=pending.get(path);
     pending.set(path,{kind:previous?.kind==='add'&&kind==='change'?'add':kind,baseline:previous?.baseline??!ready});void pump();

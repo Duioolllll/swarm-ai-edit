@@ -8,17 +8,20 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
   type Delta = Omit<Snapshot, 'style' | 'media'> & {
     kind: string; capturedAt: string; viewport: {width:number;height:number};
   };
+  type ContextualDelta = Delta & {observation: 'hmr' | 'file-change'; hmrId?: string; triggerEventId?: string};
+  type FileControl = {id: string; filePath: string; timestamp: number; expiresAt: number};
   const mode = options.mode || 'hmr';
   const channel = 'swarmwatch';
   const selector = mode === 'file-change' ? 'body *' : '[data-sw-file],main,header,nav,section,article,h1,h2,h3,p,button,img,[role="button"]';
   let nonce = '', parentOrigin = '', baselineReady = false;
   let hmrUntil = 0;
   let hmrId: string | undefined;
-  let triggerEventId: string | undefined;
-  let pending: Delta[] = [];
+  const correlationDelay = 500;
+  let pending: {change: Delta; measuredAt: number}[] = [];
+  let pendingTimer: ReturnType<typeof setTimeout> | undefined;
   let suppressPendingUntil = 0;
   let lastInteractionAt = 0;
-  const controls = new Set<string>();
+  const controls = new Map<string, FileControl>();
   let previous = new Map<Element, Snapshot>();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let nextId = 0;
@@ -28,10 +31,40 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
   function send(kind: 'ready' | 'changes', changes?: unknown[]) {
     if (nonce && parentOrigin && parent !== window) parent.postMessage({ channel, kind, nonce, changes, mode, viewport: viewport() }, parentOrigin);
   }
-  function active() { return performance.now() <= hmrUntil && (mode === 'hmr' ? !!hmrId : !!triggerEventId); }
-  function transmit(changes: Delta[]) {
-    const contextual = changes.map(change => ({ ...change, observation: mode, ...(mode === 'hmr' ? {hmrId} : {triggerEventId}) }));
-    for (let offset = 0; offset < contextual.length; offset += 50) send('changes', contextual.slice(offset, offset + 50));
+  function hmrActive() { return mode === 'hmr' && !!hmrId && performance.now() <= hmrUntil; }
+  function transmit(changes: ContextualDelta[]) {
+    for (let offset = 0; offset < changes.length; offset += 50) send('changes', changes.slice(offset, offset + 50));
+  }
+  function clearPending() {
+    pending = [];
+    if (pendingTimer !== undefined) clearTimeout(pendingTimer);
+    pendingTimer = undefined;
+  }
+  function fileTrigger(change: Delta, measuredAt: number) {
+    const capturedAt = Date.parse(change.capturedAt);
+    let best: FileControl | undefined;
+    for (const control of controls.values()) {
+      if (measuredAt > control.expiresAt || capturedAt < control.timestamp - correlationDelay || capturedAt - control.timestamp >= 2500) continue;
+      if (change.filePath && change.filePath !== control.filePath && !/\.(css|scss|sass|less)$/.test(control.filePath)) continue;
+      if (!best || Math.abs(capturedAt - control.timestamp) <= Math.abs(capturedAt - best.timestamp)) best = control;
+    }
+    return best;
+  }
+  function schedulePending() {
+    if (pendingTimer !== undefined || pending.length === 0) return;
+    pendingTimer = setTimeout(() => {
+      pendingTimer = undefined;
+      const cutoff = performance.now() - correlationDelay;
+      const ready: ContextualDelta[] = [];
+      pending = pending.filter(({change, measuredAt}) => {
+        if (measuredAt > cutoff) return true;
+        const match = fileTrigger(change, measuredAt);
+        if (match) ready.push({...change, observation: 'file-change', triggerEventId: match.id});
+        return false;
+      });
+      transmit(ready);
+      schedulePending();
+    }, Math.max(0, pending[0]!.measuredAt + correlationDelay - performance.now()));
   }
   function privateElement(element: Element) {
     const file = element.closest('[data-sw-file]')?.getAttribute('data-sw-file') || '';
@@ -66,6 +99,8 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
   function measure(emit: boolean, buffer = true) {
     const current = new Map<Element, Snapshot>();
     const changes: Delta[] = [];
+    const measuredAt = performance.now();
+    const bufferGeneric = mode === 'file-change' && buffer && measuredAt >= suppressPendingUntil;
     const append = (entry: Snapshot, kind: string) => {
       const { style: _style, media: _media, ...value } = entry;
       if (changes.length < 100) changes.push({ ...value, id: `${entry.id.slice(0,95)}:${crypto.randomUUID()}`, kind, capturedAt: new Date().toISOString(), viewport: viewport() });
@@ -76,7 +111,7 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
       if (!entry) continue;
       current.set(element, entry);
       if (!observed.has(element)) { resizeObserver.observe(element); observed.add(element); }
-      if (!emit && (mode !== 'file-change' || !buffer || performance.now() < suppressPendingUntil)) continue;
+      if (!emit && !bufferGeneric) continue;
       const before = previous.get(element);
       if (!before) append(entry, entry.tag === 'img' ? 'image' : 'created');
       else if (before.media !== entry.media) append(entry, 'image');
@@ -87,20 +122,20 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
     for (const [element, before] of previous) {
       if (!current.has(element)) {
         resizeObserver.unobserve(element); observed.delete(element);
-        if (emit || (mode === 'file-change' && buffer && performance.now() >= suppressPendingUntil)) append(before, 'deleted');
+        if (emit || bufferGeneric) append(before, 'deleted');
       }
     }
     previous = current;
-    if (emit) transmit(changes);
-    else if (mode === 'file-change' && buffer && performance.now() >= suppressPendingUntil) {
-      // Unreported deltas are useful only when a real file event arrives slightly later.
-      // They are never emitted merely because the DOM changed.
-      pending = [...pending.filter(change => Date.now() - Date.parse(change.capturedAt) <= 500), ...changes].slice(-100);
+    if (emit) transmit(changes.map(change => ({...change, observation: 'hmr', hmrId})));
+    else if (bufferGeneric && changes.length) {
+      // Let the watcher report a newer edit before choosing a trigger for this delta.
+      pending = [...pending, ...changes.map(change => ({change, measuredAt}))].slice(-100);
+      schedulePending();
     }
   }
   function schedule() {
     if (!baselineReady || timeout) return;
-    timeout = setTimeout(() => { timeout = undefined; measure(active()); }, 80);
+    timeout = setTimeout(() => { timeout = undefined; measure(hmrActive()); }, 80);
   }
   const resizeObserver = new ResizeObserver(schedule);
   const mutations = new MutationObserver(schedule);
@@ -110,7 +145,7 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
     if (!message || message.channel !== channel) return;
     if (message.kind === 'connect') {
       if (typeof message.nonce !== 'string' || message.nonce.length < 8 || message.nonce.length > 256) return;
-      if (nonce && nonce !== message.nonce) { pending = []; hmrId = undefined; triggerEventId = undefined; hmrUntil = 0; }
+      if (nonce && nonce !== message.nonce) { clearPending(); controls.clear(); hmrId = undefined; hmrUntil = 0; }
       nonce = message.nonce; parentOrigin = event.origin;
       if (baselineReady) send('ready');
       return;
@@ -121,14 +156,8 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
     const validPath = typeof file === 'string' && file.length > 0 && file.length <= 1024 && !file.includes('\\') && !file.includes('\0') && !file.startsWith('/') && !/^[a-z]:/i.test(file)
       && !file.split('/').some((part: string) => part === '..' || /^(?:\.git|node_modules|dist|coverage|\.swarmwatch|\.ssh|\.aws)$/.test(part) || /^\.env(?:\.|$)/i.test(part) || /^(?:credentials|secrets?)(?:\.|$)/i.test(part) || /\.(?:pem|key|p12|pfx)$/i.test(part));
     if (!validPath || typeof id !== 'string' || !id || id.length > 120 || controls.has(id) || !Number.isFinite(timestamp) || timestamp > Date.now() + 1000 || timestamp < Date.now() - 5000 || timestamp <= lastInteractionAt) return;
-    controls.add(id); if (controls.size > 200) controls.delete(controls.values().next().value!);
-    // Observe before opening the window, so already-rendered updates enter only the
-    // short pending buffer instead of being blindly reclassified as fresh work.
-    if (baselineReady) measure(active());
-    triggerEventId = id; hmrUntil = performance.now() + 1500;
-    const recent = pending.filter(change => Date.now() - Date.parse(change.capturedAt) <= 500 && Date.parse(change.capturedAt) >= timestamp - 500);
-    pending = [];
-    if (recent.length) transmit(recent);
+    controls.set(id, {id, filePath: file, timestamp, expiresAt: performance.now() + 1500});
+    if (controls.size > 200) controls.delete(controls.keys().next().value!);
     schedule();
   });
   function initialize() {
@@ -145,7 +174,7 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
     if (mode !== 'hmr') return;
     // Capture interactive state before the actual Vite update starts. DOM observation
     // alone does not establish development activity.
-    if (baselineReady) measure(active());
+    if (baselineReady) measure(hmrActive());
     hmrId = crypto.randomUUID(); hmrUntil = performance.now() + 1500;
     schedule();
   });
@@ -158,17 +187,17 @@ export function clientBridge(allowedOrigins: string[], options: {mode?: 'hmr' | 
   });
   const cancelForInteraction = (event: Event) => {
     if (!event.isTrusted) return;
-    hmrId = undefined; triggerEventId = undefined; hmrUntil = 0; pending = [];
+    hmrId = undefined; hmrUntil = 0; clearPending(); controls.clear();
     suppressPendingUntil = performance.now() + 600;
     lastInteractionAt = Date.now();
     schedule(); // Subsequent user-driven mutations update the baseline only.
   };
   for (const eventName of ['pointerdown', 'keydown', 'input']) window.addEventListener(eventName, cancelForInteraction, { capture: true, passive: true });
   window.addEventListener('load', schedule, true);
-  window.addEventListener('resize', () => { if (baselineReady) { measure(false, false); pending = []; send('ready'); } });
+  window.addEventListener('resize', () => { if (baselineReady) { measure(false, false); clearPending(); send('ready'); } });
   window.addEventListener('scroll', () => {
     // Scrolling changes viewport coordinates but is not a development event.
-    if (baselineReady) { if (timeout) clearTimeout(timeout); timeout = undefined; measure(false, false); pending = []; }
+    if (baselineReady) { if (timeout) clearTimeout(timeout); timeout = undefined; measure(false, false); clearPending(); }
   }, { passive: true, capture: true });
-  window.addEventListener('pagehide', () => { mutations.disconnect(); resizeObserver.disconnect(); if (timeout) clearTimeout(timeout); });
+  window.addEventListener('pagehide', () => { mutations.disconnect(); resizeObserver.disconnect(); if (timeout) clearTimeout(timeout); clearPending(); });
 }

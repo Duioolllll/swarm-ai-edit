@@ -39,19 +39,21 @@ export function instrumentJsx(code: string, filePath: string) {
 
 export function swarmwatch(options: SwarmwatchOptions = {}): Plugin {
   let root = '';
+  let base = '/';
   const configured = options.dashboardOrigin ?? process.env.SWARMWATCH_DASHBOARD_ORIGIN;
   const origins = dashboardOrigins(configured);
+  const bridgePath = () => `${base}@swarmwatch/bridge`;
   return {
     name: 'swarmwatch:instrumentation', enforce: 'pre', apply: 'serve',
-    configResolved(config) { root = config.root; },
+    configResolved(config) { root = config.root; base = config.base; },
     configureServer(server) {
-      server.middlewares.use('/@swarmwatch/bridge', (_req, res) => {
+      server.middlewares.use(bridgePath(), (_req, res) => {
         res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
         res.setHeader('Cache-Control', 'no-store');
-        res.end(`import {createHotContext} from '/@vite/client';\n(${clientBridge.toString()})(${JSON.stringify(origins)});\nconst hot = createHotContext('/@swarmwatch/bridge');\nhot.on('vite:beforeUpdate',()=>window.dispatchEvent(new Event('swarmwatch:hmr-start')));\nhot.on('vite:afterUpdate',()=>window.dispatchEvent(new Event('swarmwatch:hmr')));`);
+        res.end(`import {createHotContext} from ${JSON.stringify(base + '@vite/client')};\n(${clientBridge.toString()})(${JSON.stringify(origins)});\nconst hot = createHotContext(${JSON.stringify(bridgePath())});\nhot.on('vite:beforeUpdate',()=>window.dispatchEvent(new Event('swarmwatch:hmr-start')));\nhot.on('vite:afterUpdate',()=>window.dispatchEvent(new Event('swarmwatch:hmr')));`);
       });
     },
-    transformIndexHtml() { return [{ tag: 'script', attrs: { type: 'module', src: '/@swarmwatch/bridge' }, injectTo: 'head' }]; },
+    transformIndexHtml() { return [{ tag: 'script', attrs: { type: 'module', src: bridgePath() }, injectTo: 'head' }]; },
     transform(code, id) {
       const clean = id.split('?')[0];
       if (!/\.[jt]sx?$/.test(clean) || clean.includes('/node_modules/')) return;

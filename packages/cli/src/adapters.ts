@@ -135,29 +135,42 @@ export function createOpenCodeAdapter(ctx: AdapterContext): AgentAdapter {
       const eventId = string(data.id);
       if (eventId && duplicate(`event:${eventId}`)) return out;
       const info = object(properties.info);
-      const sid = string(properties.sessionID) ?? string(info.id);
+      const sessionId = string(properties.sessionID);
+      const sid = sessionId ?? string(info.id);
       const agent = sid ? identity('opencode', sid) : 'opencode:unassigned';
       const add = (eventType: EventType, meta: RecordValue = {}, path?: unknown, status?: string, id = agent) => out.push(publish(eventType, id, { adapter: 'opencode-v1', ...meta }, path, status));
+      // The project-scoped stream can begin after a session was created.
+      const observeAgent = (id: string) => {
+        if (agents.has(id)) return;
+        agents.add(id);
+        add('agent.started', { transport: 'sse' }, undefined, 'connected', id);
+      };
       if (type === 'session.created' && sid) {
         // Session event belongs to its declared directory when provided.
         if (typeof info.directory === 'string' && resolve(info.directory) !== realpathSync(ctx.project)) return out;
-        if (!agents.has(agent)) { agents.add(agent); add('agent.started', { transport: 'sse' }, undefined, 'connected'); }
+        observeAgent(agent);
       } else if (type === 'session.deleted' && sid) {
         agents.delete(agent); add('agent.finished', { reason: 'session-deleted' }, undefined, 'completed');
-      } else if (type === 'session.status' && sid) {
+      } else if (type === 'session.status' && sessionId) {
         const status = object(properties.status).type;
+        if (status === 'busy' || status === 'retry' || status === 'idle') observeAgent(agent);
         if (status === 'busy') add('task.started', { kind: 'session-turn' }, undefined, 'running');
         else if (status === 'retry') add('error.detected', { kind: 'retry' }, undefined, 'retrying');
-      } else if (type === 'session.idle' && sid) add('task.completed', { kind: 'session-turn' }, undefined, 'idle');
-      else if (type === 'session.error') add('error.detected', { kind: 'session' }, undefined, 'failed');
-      else if (type === 'file.edited') {
+      } else if (type === 'session.idle' && sessionId) {
+        observeAgent(agent);
+        add('task.completed', { kind: 'session-turn' }, undefined, 'idle');
+      } else if (type === 'session.error') {
+        if (sessionId) observeAgent(agent);
+        add('error.detected', { kind: 'session' }, undefined, 'failed');
+      } else if (type === 'file.edited') {
         const path = adapterFilePath(ctx.project, properties.file);
         if (path) add('file.modified', { attribution: 'unassigned: upstream event has no session ID' }, path, 'completed', 'opencode:unassigned');
       } else if (type === 'message.part.updated') {
         const part = object(properties.part), state = object(part.state), input = object(state.input), meta = object(state.metadata);
-        const partId = string(part.id), sessionId = string(part.sessionID);
-        if (part.type !== 'tool' || !partId || !sessionId || duplicate(`tool:${partId}:${state.status}`)) return out;
-        const id = identity('opencode', sessionId);
+        const partId = string(part.id), partSessionId = string(part.sessionID);
+        if (part.type !== 'tool' || !partId || !partSessionId || duplicate(`tool:${partId}:${state.status}`)) return out;
+        const id = identity('opencode', partSessionId);
+        if (state.status === 'running' || state.status === 'completed' || state.status === 'error') observeAgent(id);
         const kind = part.tool === 'bash' ? (typeof input.command === 'string' ? commandKind(input.command) : commands.get(partId)) : undefined;
         if (kind) commands.set(partId, kind);
         const details = { itemId: partId, kind: kind ?? 'tool', ...(kind ? { classification: 'command-name-heuristic' } : {}) };

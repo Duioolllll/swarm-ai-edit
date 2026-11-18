@@ -16,7 +16,7 @@ describe('browser bridge observations', () => {
       }
       if (req.url?.startsWith('/child')) {
         const origins = req.url.includes('untrusted') ? [] : [origin];
-        if (req.url.includes('generic')) res.end('<div id="panel">Plain baseline</div><button onclick="this.textContent=\'Clicked\'">Interact</button><input value="private input"><script src="/bridge.js"></script>');
+        if (req.url.includes('generic')) res.end('<div id="panel">Plain baseline</div><p id="a" data-sw-file="a.html">First file</p><p id="b" data-sw-file="b.html">Second file</p><button onclick="this.textContent=\'Clicked\'">Interact</button><input value="private input"><script src="/bridge.js"></script>');
         else res.end(`<button onclick="this.textContent='Clicked'" data-sw-file="src/Button.tsx" data-sw-component="Button">First</button><script>(${clientBridge.toString()})(${JSON.stringify(origins)})</script>`);
       } else {
         res.end(`<iframe src="/child${req.url?.includes('generic') ? '?generic' : ''}"></iframe><script>window.observations=[];addEventListener("message",event=>window.observations.push(event.data))</script>`);
@@ -127,5 +127,30 @@ describe('browser bridge observations', () => {
     await page.waitForTimeout(150);
     expect(await page.evaluate(() => (window as any).observations.flatMap((e:any) => e.changes || []).filter((e:any) => e.text === 'Already rendered').length)).toBe(1);
     await page.close();
+  });
+  it('keeps consecutive mapped changes with their own file controls', async () => {
+    const page = await browser.newPage();
+    try {
+      await page.goto(`${origin}/?generic`);
+      await page.evaluate(() => document.querySelector('iframe')!.contentWindow!.postMessage({channel:'swarmwatch',kind:'connect',nonce:'trusted-nonce-1234'}, location.origin));
+      await expect.poll(() => page.evaluate(() => (window as any).observations.some((e:any) => e.kind === 'ready'))).toBe(true);
+      const frame = page.frameLocator('iframe');
+      const notify = (filePath: string, eventId: string) => page.evaluate(({filePath, eventId}) => {
+        document.querySelector('iframe')!.contentWindow!.postMessage({channel:'swarmwatch',kind:'file-change',nonce:'trusted-nonce-1234',filePath,eventId,timestamp:new Date().toISOString()}, location.origin);
+      }, {filePath, eventId});
+      await notify('a.html', 'edit-a');
+      await frame.locator('#a').evaluate(element => {element.textContent = 'First edit';});
+      await page.waitForTimeout(120);
+      await frame.locator('#b').evaluate(element => {element.textContent = 'Second edit';});
+      // The DOM can update before the watcher's write-stability delay has elapsed.
+      await page.waitForTimeout(120);
+      await notify('b.html', 'edit-b');
+      await expect.poll(() => page.evaluate(() => (window as any).observations.flatMap((event: any) => event.changes ?? [])
+        .filter((change: any) => change.kind === 'text')
+        .map((change: any) => [change.text, change.filePath, change.triggerEventId]))).toEqual([
+        ['First edit', 'a.html', 'edit-a'],
+        ['Second edit', 'b.html', 'edit-b'],
+      ]);
+    } finally { await page.close(); }
   });
 });

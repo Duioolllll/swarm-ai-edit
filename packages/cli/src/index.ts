@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import {spawn, type ChildProcess} from 'node:child_process';
+import {spawn, type ChildProcess, type StdioOptions} from 'node:child_process';
 import {realpath,stat} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {createInterface} from 'node:readline';
@@ -43,7 +43,7 @@ async function main(){
  async function stop(){if(closing)return;closing=true;controller.abort();for(const child of children){if(child.pid){try{process.kill(-child.pid,'SIGTERM');}catch{child.kill('SIGTERM');}}}await server.close();}
  for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,()=>{void stop().finally(()=>process.exit(0));});
  const env={...process.env,SWARMWATCH_DASHBOARD_ORIGIN:`http://127.0.0.1:${server.port}`};
- function run(exe:string,args:string[],stdio:'inherit'|'pipe'='inherit',shell=false){
+ function run(exe:string,args:string[],stdio:StdioOptions='inherit',shell=false){
    const child=spawn(exe,args,{cwd:project,env,stdio,detached:true,shell});children.push(child);
    child.on('error',error=>{ctx.emit({eventId:randomUUID(),sessionId:server.sessionId,agentId:'local-runtime',timestamp:new Date().toISOString(),eventType:'error.detected',status:'failed',source:'runtime',confidence:'reported',metadata:{message:error.message}});console.error(`Could not start ${exe}: ${error.message}`);});
    return child;
@@ -52,7 +52,8 @@ async function main(){
  if(values.codex){
    const {createCodexAdapter}=await import('./adapters.js');
    const adapter=createCodexAdapter(ctx);
-   const child=run('codex',['exec','--json',values.codex],'pipe');
+   // Codex reads piped stdin to EOF even when given a positional prompt.
+   const child=run('codex',['exec','--json',values.codex],['ignore','pipe','pipe']);
    const lines=createInterface({input:child.stdout!});
    lines.on('line',line=>{try{adapter.ingest(JSON.parse(line));}catch{/* non-JSON never becomes a made-up event */}});
    child.stderr?.pipe(process.stderr);child.once('exit',()=>adapter.finish());

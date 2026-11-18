@@ -1,5 +1,5 @@
 import {afterEach,describe,expect,it} from 'vitest';
-import {mkdtemp,mkdir,rm,symlink,writeFile} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm,symlink,unlink,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {LocalChangeAnalyzer,readBoundedSnapshot,supportedFileInfo} from './analyzer.js';
@@ -75,4 +75,26 @@ describe('framework-independent watcher',()=>{
     expect(events.every(event=>event.filePath?.startsWith('src/')&&event.componentName===undefined&&event.metadata.analysis)).toBe(true);
     expect(events.find(event=>event.eventType==='file.modified')?.metadata.analysis).toMatchObject({engine:'local-diff',linesAdded:1,linesRemoved:1,counting:'exact-line-diff'});
   });
+
+  it('still records deletes when the initial snapshot queue reaches its limit',async()=>{
+    const project=await mkdtemp(join(tmpdir(),'swarmwatch-many-files-'));cleanups.push(()=>rm(project,{recursive:true,force:true}));
+    const paths=Array.from({length:4000},(_,i)=>`page-${String(i).padStart(4,'0')}.html`);
+    for(let i=0;i<paths.length;i+=100){
+      await Promise.all(paths.slice(i,i+100).map(path=>writeFile(join(project,path),'<main>Page</main>\n')));
+    }
+    await symlink(join(project,paths[1]),join(project,'alias.html'));
+    await writeFile(join(project,'secrets.json'),'{}');
+    const store=new EventStore(':memory:');cleanups.push(()=>store.close());
+    const events:SwarmEvent[]=[];const collector=new Collector(store,'overflow-session',event=>events.push(event));
+    const watcher=await watchProject(project,collector);cleanups.push(()=>watcher.close());
+    expect(events.filter(event=>event.status==='watcher-backpressure')).toHaveLength(1);
+
+    const removed=paths.filter((_,i)=>i%100===0);
+    await Promise.all([...removed,'alias.html','secrets.json'].map(path=>unlink(join(project,path))));
+    const observed=()=>events.filter(event=>event.eventType==='file.deleted');
+    await waitFor(observed,items=>removed.every(path=>items.some(event=>event.filePath===path)));
+    expect(observed().map(event=>event.filePath).sort()).toEqual(removed);
+    const withoutBaseline=observed().find(event=>(event.metadata.analysis as {truncation?:string}).truncation==='missing-baseline');
+    expect(withoutBaseline?.metadata.analysis).toMatchObject({bytesBefore:null,bytesAfter:0,linesRemoved:null,counting:'unavailable'});
+  },15000);
 });

@@ -45,6 +45,14 @@ test('plain HTML file edits produce local diffs and measured cursors without Vit
     await expect(page.frameLocator('iframe').getByRole('button',{name:'Clicked locally'})).toBeVisible();
     await page.waitForTimeout(600);
     expect((await events()).filter(e=>e.metadata.dom)).toHaveLength(before);
+
+    await page.getByRole('tab',{name:'Replay',exact:true}).click();
+    await expect(page.getByLabel('Resume visualization')).toBeEnabled();
+    const editDuringReplay='An edit recorded during replay';
+    await writeFile(join(project,'content.html'),(await readFile(join(project,'content.html'),'utf8')).replace('A second local edit',editDuringReplay));
+    await expect(page.frameLocator('iframe').getByRole('button',{name:editDuringReplay})).toBeVisible();
+    await expect.poll(async()=>(await events()).some(event=>event.metadata.dom?.text===editDuringReplay)).toBe(true);
+
     expect((await events()).some(e=>e.source==='agent-hook')).toBe(false);
     expect(externalRequests).toEqual([]);
   }finally{await page.close();await server.close();await new Promise<void>(done=>app.close(()=>done()));await rm(project,{recursive:true,force:true});}

@@ -93,6 +93,29 @@ describe('OpenCode official v1 SSE event adapter', () => {
     expect(events.filter(e => e.eventType === 'agent.finished')).toHaveLength(2);
   });
 
+  it('registers existing sessions from scoped activity even without a creation event', () => {
+    const { ctx, events } = collected(), adapter = createOpenCodeAdapter(ctx);
+    adapter.ingest({ type: 'server.connected', properties: {} });
+    adapter.ingest({ type: 'file.edited', properties: { file: 'src/App.tsx' } });
+    adapter.ingest({ type: 'session.error', properties: {} });
+    expect(events.filter(e => e.eventType === 'agent.started')).toHaveLength(0);
+
+    const status = adapter.ingest({ type: 'session.status', properties: { sessionID: 'existing', status: { type: 'busy' } } });
+    expect(status.map(e => e.eventType)).toEqual(['agent.started', 'task.started']);
+    expect(status[1].agentId).toBe(status[0].agentId);
+    const idle = adapter.ingest({ type: 'session.idle', properties: { sessionID: 'existing' } });
+    expect(idle.map(e => e.eventType)).toEqual(['task.completed']);
+    expect(idle[0].agentId).toBe(status[0].agentId);
+    expect(adapter.ingest({ type: 'session.created', properties: { info: { id: 'existing', directory: project } } })).toEqual([]);
+
+    const tool = adapter.ingest({ type: 'message.part.updated', properties: {
+      part: { id: 'part1', sessionID: 'tool-only', type: 'tool', tool: 'bash', state: { status: 'running', input: { command: 'npm test' } } },
+    } });
+    expect(tool.map(e => e.eventType)).toEqual(['agent.started', 'task.started', 'test.started']);
+    expect(tool[0].agentId).not.toBe(status[0].agentId);
+    expect(adapter.finish().map(e => e.agentId)).toEqual([status[0].agentId, tool[0].agentId]);
+  });
+
   it('never treats generic tool completion as test success, filters private files', () => {
     const { ctx, events } = collected(), adapter = createOpenCodeAdapter(ctx);
     adapter.ingest({ type: 'message.part.updated', properties: { part: { id: 'tool1', sessionID: 's1', type: 'tool', tool: 'bash', state: { status: 'running', input: { command: 'npm test' } } } } });
