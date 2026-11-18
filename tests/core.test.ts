@@ -1,0 +1,8 @@
+import {describe,it,expect} from 'vitest';
+import {AnimationScheduler,EventInputSchema,safeRelativePath,redact,orderedUnique,type SwarmEvent} from '@swarmwatch/core';
+describe('independent event and animation core',()=>{
+ it('bounds queues while keeping actual agents independent',()=>{const q=new AnimationScheduler<{agentId:string,n:number}>(2);q.push({agentId:'codex:1',n:1});q.push({agentId:'codex:1',n:2});q.push({agentId:'codex:1',n:3});q.push({agentId:'opencode:1',n:7});expect(q.next('codex:1')?.n).toBe(2);expect(q.next('opencode:1')?.n).toBe(7);expect(q.next('codex:1')?.n).toBe(3);q.clear();expect(q.agents).toEqual([]);});
+ it('denies secret paths and traversal with both path syntaxes',()=>{for(const p of ['../outside.tsx','/tmp/out.ts','src/../../key.ts','.env','.env.local','src/secrets.json','x\\..\\file.ts','private.pem','node_modules/x.js'])expect(safeRelativePath(p),p).toBe(false);expect(safeRelativePath('src/Navbar.tsx')).toBe(true);});
+ it('redacts credentials recursively without exposing values',()=>{expect(redact({authorization:'abc',nested:{message:'token=abc123',normal:'file.ts'}})).toEqual({authorization:'[REDACTED]',nested:{message:'[REDACTED]',normal:'file.ts'}});});
+ it('validates events and restores deterministic deduplicated sequence order',()=>{const input={eventId:'evt',sessionId:'s',agentId:'file-observer',timestamp:new Date().toISOString(),eventType:'file.created',source:'file-watcher',confidence:'inferred',metadata:{}};expect(EventInputSchema.safeParse({...input,eventType:'agent.reads-mind'}).success).toBe(false);const a={...EventInputSchema.parse(input),sequence:2} as SwarmEvent;const b={...a,eventId:'earlier',sequence:1};expect(orderedUnique([a,b,a]).map(e=>e.sequence)).toEqual([1,2]);});
+});

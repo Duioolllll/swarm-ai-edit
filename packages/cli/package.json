@@ -1,0 +1,30 @@
+{
+  "name": "swarmwatch",
+  "version": "0.1.0",
+  "description": "Watch real development changes, live.",
+  "type": "module",
+  "bin": {
+    "swarmwatch": "bin/swarmwatch.mjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\""
+  },
+  "dependencies": {
+    "@swarmwatch/core": "0.1.0",
+    "@swarmwatch/server": "0.1.0"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Duioolllll/swarm-ai-edit.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/Duioolllll/swarm-ai-edit#readme",
+  "bugs": {
+    "url": "https://github.com/Duioolllll/swarm-ai-edit/issues"
+  }
+}

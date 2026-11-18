@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Plain HTML / Local Watch</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f6f6f3;color:#252525;font:15px/1.6 system-ui,sans-serif}main{max-width:900px;margin:50px auto;padding:30px}nav{display:flex;justify-content:space-between;padding-bottom:22px;border-bottom:1px solid #ccc;font:11px monospace}h1{font-size:60px;line-height:1.1;letter-spacing:-3px;font-weight:400;margin:50px 0 25px}p{max-width:500px;color:#666}button{border:1px solid #222;background:#222;color:#fff;padding:14px 22px;cursor:pointer}.note{font:11px monospace;border-top:1px solid #ccc;margin-top:55px;padding-top:20px;color:#888}.example-navbar{border:1px solid #bbb;padding:15px;margin-bottom:20px}
+</style>
+<script src="__BRIDGE_ORIGIN__/bridge.js"></script>
+</head>
+<body><main id="app"></main>
+<script>
+// This tiny example dev runtime renders actual content.html edits. It emits no
+// SwarmWatch events and uses no framework or AI API. The independent bridge
+// measures the resulting DOM after the filesystem watcher reports a change.
+let previous='';let stopped=false;
+async function refresh(){try{const response=await fetch('/content.html',{cache:'no-store'});if(response.ok){const html=await response.text();if(html!==previous){previous=html;document.getElementById('app').innerHTML=html;}}}finally{if(!stopped)setTimeout(refresh,250);}}
+refresh();window.addEventListener('pagehide',()=>stopped=true);
+</script></body></html>

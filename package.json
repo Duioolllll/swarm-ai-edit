@@ -1,0 +1,42 @@
+{
+  "name": "swarmwatch-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "examples/*"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "npm run build -w @swarmwatch/core && npm run build -w @swarmwatch/bridge && npm run build -w @swarmwatch/server && npm run build -w @swarmwatch/vite-plugin && npm run build -w swarmwatch && npm run build -w @swarmwatch/dashboard",
+    "dev": "node packages/cli/dist/index.js watch --project examples/react-app --url http://127.0.0.1:5173 -- npm run dev",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "typecheck": "tsc -p packages/core/tsconfig.json --noEmit && tsc -p packages/bridge/tsconfig.json --noEmit && tsc -p packages/server/tsconfig.json --noEmit && tsc -p packages/vite-plugin/tsconfig.json --noEmit && tsc -p packages/cli/tsconfig.json --noEmit && tsc -p apps/dashboard/tsconfig.json --noEmit",
+    "demo": "node packages/cli/dist/index.js watch --demo --project examples/react-app --url http://127.0.0.1:5173 -- npm run dev",
+    "demo:plain": "node packages/cli/dist/index.js watch --demo --project examples/plain-app --url http://127.0.0.1:5180 -- npm run dev"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "tsx": "4.23.15",
+    "vitest": "5.1.0",
+    "@playwright/test": "1.65.1",
+    "@types/node": "26.6.6",
+    "@types/ws": "8.18.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Duioolllll/swarm-ai-edit.git"
+  },
+  "homepage": "https://github.com/Duioolllll/swarm-ai-edit#readme",
+  "bugs": {
+    "url": "https://github.com/Duioolllll/swarm-ai-edit/issues"
+  }
+}
